@@ -5,7 +5,7 @@
 
 | Layer | Repository | Responsibilities |
 | --- | --- | --- |
-| RPC | vgi-rpc-c | IPC, clients, transports, reflection, identity, stream state, HTTP, external payloads |
+| RPC | vgi-rpc-c | IPC, clients, transports, shared memory, worker pools, telemetry, reflection, identity, stream state, HTTP, external payloads |
 | VGI application | vgi-c | Function execution, catalogs, filtering, COPY, cache metadata, split plans, attach tickets |
 | Canonical schemas | vgi-python / vgi-rpc-python | VGI and RPC protocol definitions respectively |
 
@@ -32,6 +32,14 @@ Public compatibility headers such as `vgi/rpc.h` forward to `vgi_rpc/rpc.h`.
 Applications can include the RPC headers directly. Generic credentials and
 Identity operations belong to the RPC package; VGI attach-ticket helpers remain
 in `vgi/credentials.h`.
+
+Local clients opt into [shared-memory transfer](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/shared-memory.md)
+through `VgiClientOptions.shared_memory_size`. The [worker pool](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/pooling.md)
+reuses bounded subprocess clients with exclusive leases. Both APIs are available
+through the RPC headers. For [OpenTelemetry](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/telemetry.md),
+create a telemetry instance and attach it with `VgiWorkerSetTelemetry()` before
+serving. The example worker reads `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_SERVICE_NAME`, and the endpoint override `VGI_RPC_OTEL_ENDPOINT`.
 
 ## Generation
 

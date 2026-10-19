@@ -1495,6 +1495,9 @@ void VgiWorkerSetHttpOptions(struct VgiWorker *w, const struct VgiHttpOptions *o
     w->http_options = *o;
     w->has_http_options = 1;
 }
+int VgiWorkerSetTelemetry(struct VgiWorker *worker, struct VgiTelemetry *telemetry) {
+    return worker ? VgiRpcServerSetTelemetry(worker->rpc, telemetry) : EINVAL;
+}
 static const struct VgiBatch *ticket_catalog(void *state, const char *name) {
     return VgiCatalogInfo(((struct VgiWorker *)state)->catalog_service, name);
 }

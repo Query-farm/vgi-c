@@ -28,6 +28,13 @@ state, rotated grant keys, attach tickets, bounded streaming continuations,
 request/response compression, cancellation, CORS, and JSON access logs.
 Protocol reflection and additional hosted protocols use the same dispatcher.
 
+The RPC library also supplies shared-memory transfers for subprocess and Unix
+connections, bounded C client worker pools, and OpenTelemetry traces and metrics.
+Shared-memory results own their buffers and remain valid after the connection
+closes. See the [shared-memory](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/shared-memory.md),
+[pooling](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/pooling.md), and
+[telemetry](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/telemetry.md) guides.
+
 The native dependencies are nanoarrow IPC, json-c, libsodium, SQLite3,
 libevent, libcurl, zstd, LZ4, zlib, and platform threads. Python and the C++ worker are
 used only for generation and compatibility testing. The example worker's
@@ -247,6 +254,19 @@ HTTP CLI configuration includes `VGI_HTTP_HOST`, `VGI_HTTP_NO_COMPRESSION`,
 `VGI_OPTIONAL_BEARER_TOKENS`. Access logs contain routing and identity information,
 not credentials or argument values. Attach-option secrets remain in private
 server storage; attachment cookies and split plans are sealed on HTTP.
+
+Enable OpenTelemetry in the example worker with an OTLP/HTTP collector:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
+OTEL_SERVICE_NAME=vgi-example-worker ./build/example-worker/vgi-example-worker --http 8080
+```
+
+`VGI_RPC_OTEL_ENDPOINT` overrides the collector endpoint. Embedders create a
+`VgiTelemetry` and call `VgiWorkerSetTelemetry()` before serving. The telemetry
+instance must outlive the worker and its serving threads. It propagates W3C trace
+context, correlates in-band logs, and exports spans, request counters, and duration
+histograms asynchronously. Collector failures do not change RPC results.
 
 ## Using the library
 

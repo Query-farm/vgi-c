@@ -83,6 +83,8 @@ int VgiWorkerAddProtocol(struct VgiWorker *, const struct VgiRpcProtocol *, stru
 struct VgiHttpOptions;
 /* Configure default HTTP callbacks before Run; borrowed objects must outlive it. */
 void VgiWorkerSetHttpOptions(struct VgiWorker *, const struct VgiHttpOptions *);
+/* Configure before serving. The telemetry instance must outlive the worker. */
+int VgiWorkerSetTelemetry(struct VgiWorker *, struct VgiTelemetry *);
 int VgiWorkerServeHttp(struct VgiWorker *, const struct VgiHttpOptions *, struct ArrowError *);
 int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowError *error);
 int VgiWorkerServe(struct VgiWorker *worker, FILE *input, FILE *output, struct ArrowError *error);
