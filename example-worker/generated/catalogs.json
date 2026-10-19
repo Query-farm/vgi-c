@@ -1,0 +1,54 @@
+{
+  "configurations": [
+    [
+      "example",
+      null
+    ],
+    [
+      "attach_options",
+      null
+    ],
+    [
+      "versioned",
+      null
+    ],
+    [
+      "versioned_tables",
+      null
+    ],
+    [
+      "versioned_tables",
+      "1.0.0"
+    ],
+    [
+      "versioned_tables",
+      "1.1.0"
+    ],
+    [
+      "versioned_tables",
+      "2.0.0"
+    ]
+  ],
+  "catalogs": [
+    "example",
+    "versioned_tables",
+    "attach_options_required",
+    "attach_options",
+    "ticket_probe",
+    "contents_probe",
+    "contents_broken",
+    "contents_legacy",
+    "accumulate",
+    "projection_repro",
+    "twin_a",
+    "twin_b",
+    "narrow_bind",
+    "attach_options",
+    "attach_options_required",
+    "versioned",
+    "versioned_tables",
+    "versioned_tables",
+    "versioned_tables",
+    "versioned_tables"
+  ]
+}
