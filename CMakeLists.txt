@@ -64,6 +64,7 @@ install(TARGETS vgi EXPORT vgi-targets
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(DIRECTORY include/vgi DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/vgi-c")
 install(EXPORT vgi-targets NAMESPACE vgi:: DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vgi")
 configure_package_config_file(cmake/vgi-config.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/vgi-config.cmake"

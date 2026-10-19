@@ -285,6 +285,8 @@ cmake --install build --prefix /path/to/install
 Consumers can then use `find_package(vgi CONFIG REQUIRED)` and link
 `vgi::vgi`. Nanoarrow headers and its static IPC dependency are installed too.
 
+Contributor and coding-agent guidance is in [AGENTS.md](AGENTS.md).
+
 ## License
 
 Query Farm Source-Available License, Version 1.0; see [LICENSE](LICENSE).
