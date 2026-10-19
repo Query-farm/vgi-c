@@ -151,6 +151,8 @@ The example worker is tested against the canonical extension harness:
 ./scripts/run_tests.sh                    # full subprocess suite
 ./scripts/run_tests.sh --no-build scalar  # one category
 VGI_HTTP=1 ./scripts/run_tests.sh          # HTTP suite plus bearer lane
+VGI_RPC_SHM_SIZE_BYTES=67108864 VGI_RPC_SHM_MIN_BATCH_BYTES=0 \
+  ./scripts/run_tests.sh                  # force shared-memory transfers
 ```
 
 The runner requires `~/Development/vgi/build/release/test/unittest` and always
@@ -158,12 +160,16 @@ supplies the canonical test directory and `no_error_skip.json` configuration.
 `VGI_EXT`, `VGI_C_BUILD`, and `VGI_C_TEST_CACHE` override those locations.
 Transport-specific tests require their corresponding fixtures. The runner reports
 missing fixtures explicitly and uses the strict no-error-skip configuration.
+The SHM lane exercises capability negotiation, segment reuse across unary calls,
+COPY TO, buffered functions, and retained cached results. Inline catalog/bind
+calls can share the same pooled worker connection.
 
 Validated on macOS arm64 against the local reference checkouts:
 
 | Check | Result |
 | --- | --- |
 | Full subprocess SQL suite | 328 passed, 43 fixture-dependent skips; 12,098 assertions |
+| Full subprocess suite, forced shared memory | 328 passed, 43 fixture-dependent skips; 12,098 assertions |
 | Full HTTP SQL suite | 336 passed, 35 fixture-dependent skips; 12,260 assertions |
 | Protected bearer lane, each run | 2 passed; 13 assertions |
 | Native C tests | 6 groups passed |

@@ -56,8 +56,16 @@ unpublished changes to the Python repository.
 `~/Development/vgi`, with strict `no_error_skip.json`. `VGI_HTTP=1` selects HTTP.
 The example worker needs no Python or C++ process to execute methods.
 
+To exercise shared-memory transfers throughout the subprocess suite, set
+`VGI_RPC_SHM_SIZE_BYTES=67108864 VGI_RPC_SHM_MIN_BATCH_BYTES=0` when running the
+script. The extension negotiates support before creating a segment. This lane
+covers mixed inline and shared-memory calls on pooled workers, buffered functions,
+COPY TO, and cached results retained across later requests.
+
 The final validation used the 371-case canonical inventory: 328 subprocess cases
 and 336 HTTP cases passed, with 43 and 35 fixture-dependent skips respectively.
+The forced shared-memory subprocess run also passed 328 cases and 12,098
+assertions, with the same 43 fixture-dependent skips.
 The separate bearer lane passed 2 cases and 13 assertions for each transport.
 Six native test groups also passed. The RPC package has independent shared
 server, native-client, sanitizer, and HTTPS validation documented in its
