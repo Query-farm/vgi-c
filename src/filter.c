@@ -79,14 +79,13 @@ static int from_array(const struct ArrowArrayView *view, const struct ArrowSchem
             out->integer = ArrowArrayViewGetIntUnsafe(view, row);
             out->number = out->integer;
         }
-    } else {
+    } else if (view->storage_type != NANOARROW_TYPE_STRUCT &&
+               view->storage_type != NANOARROW_TYPE_LIST &&
+               view->storage_type != NANOARROW_TYPE_LARGE_LIST) {
+        /* Nested values are read through their children, never as numbers. */
         double value;
-        if (!VgiValueDouble(view, schema, row, &value, NULL))
-            out->number = value;
-        else if (view->storage_type != NANOARROW_TYPE_STRUCT &&
-                 view->storage_type != NANOARROW_TYPE_LIST &&
-                 view->storage_type != NANOARROW_TYPE_LARGE_LIST)
-            return EINVAL;
+        if (VgiValueDouble(view, schema, row, &value, NULL)) return EINVAL;
+        out->number = value;
     }
     return 0;
 }
