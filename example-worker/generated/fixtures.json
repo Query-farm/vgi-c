@@ -1,5 +1,5 @@
 {
-  "protocol_version": "2.1.0",
+  "protocol_version": "2.2.0",
   "protocol_hash": "774cb80090d71ea76d09aa311b9cda4ca4c33c3bf72c43242eb6dc87b6f79ce5",
   "binary_sha256": "9aeaf76155dc72e84d2858592a4057aff82cbc2d4ff89098796c37a6c7bb1aec",
   "function_count": 267,

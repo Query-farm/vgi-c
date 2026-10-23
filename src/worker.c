@@ -101,16 +101,24 @@ int VgiFunctionInit(struct VgiFunction *function, const char *name, enum VgiFunc
     if (!rc) rc = ArrowSchemaDeepCopy(output, &function->output);
     if (!rc) rc = VgiBatchInitNamed(&function->info, "FunctionInfo", error);
     if (!rc) rc = VgiBatchSetString(&function->info, "name", name);
-    const char *type = kind == VGI_SCALAR      ? "scalar"
-                       : kind == VGI_AGGREGATE ? "aggregate"
-                       : kind == VGI_BUFFERING ? "table_buffering"
-                                               : "table";
+    /* The wire carries FunctionType member names. */
+    const char *type = kind == VGI_SCALAR      ? "SCALAR"
+                       : kind == VGI_AGGREGATE ? "AGGREGATE"
+                       : kind == VGI_BUFFERING ? "TABLE_BUFFERING"
+                                               : "TABLE";
     if (!rc) rc = VgiBatchSetString(&function->info, "function_type", type);
     if (!rc) rc = VgiIpcWriteSchema(arguments, &bytes, error);
-    if (!rc) rc = VgiBatchSetBytes(&function->info, "arguments", bytes.data, bytes.size_bytes);
+    /* Wire 2.2 dictionary-encodes FunctionInfo's schemas; this appends either form. */
+    if (!rc)
+        rc = VgiArrayAppendString(
+            VgiBatchColumn(&function->info, "arguments"),
+            (struct ArrowStringView){(const char *)bytes.data, bytes.size_bytes});
     ArrowBufferReset(&bytes);
     if (!rc) rc = VgiIpcWriteSchema(output, &bytes, error);
-    if (!rc) rc = VgiBatchSetBytes(&function->info, "output_schema", bytes.data, bytes.size_bytes);
+    if (!rc)
+        rc = VgiArrayAppendString(
+            VgiBatchColumn(&function->info, "output_schema"),
+            (struct ArrowStringView){(const char *)bytes.data, bytes.size_bytes});
     ArrowBufferReset(&bytes);
     if (rc) VgiFunctionReset(function);
     return rc;
@@ -554,7 +562,6 @@ static int catalog_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
         char *requested =
             !strcmp(method, "catalog_schema_get") ? schema_path(&call->request) : NULL;
         if (!catalog || (!strcmp(method, "catalog_schema_get") && !requested)) rc = ENOMEM;
-        struct ArrowBufferView opaque = VgiBatchBytes(&call->request, "attach_opaque_data");
         for (size_t i = 0; !rc && i <= worker->function_count; ++i) {
             const char *path = i == worker->function_count ? "main" : worker->functions[i].schema;
             if (i < worker->function_count && strcmp(worker->functions[i].catalog, catalog))
@@ -568,9 +575,6 @@ static int catalog_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
             if (duplicate) continue;
             rc = VgiBatchInitNamed(&item, "SchemaInfo", &call->error);
             if (!rc) rc = append_path(VgiBatchColumn(&item, "path"), path);
-            if (!rc)
-                rc = VgiBatchSetBytes(&item, "attach_opaque_data", opaque.data.data,
-                                      opaque.size_bytes);
             if (!rc) rc = VgiBatchFinishRow(&item, &call->error);
             if (!rc) rc = append_item(items, &item, &call->error);
             VgiBatchReset(&item);

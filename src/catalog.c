@@ -10,6 +10,7 @@
 
 #include "catalog_internal.h"
 #include "tickets_internal.h"
+#include "vgi/generated/protocol.h"
 #include "vgi/storage.h"
 struct Snapshot {
     char *version;
@@ -49,6 +50,15 @@ static int kind_is(struct ArrowStringView value, const char *text) {
 static int copy_batch(const struct VgiBatch *input, struct VgiBatch *out,
                       struct ArrowError *error) {
     return VgiBatchCoerce(input, &input->schema, out, error);
+}
+/* Copy one named value of a one-row batch; a missing field is null. */
+static int copy_value(struct VgiBatch *out, const struct VgiBatch *source, const char *name,
+                      struct ArrowError *error) {
+    int64_t a = VgiFieldIndex(&out->schema, name), b = VgiFieldIndex(&source->schema, name);
+    if (a < 0) return EINVAL;
+    if (b < 0) return ArrowArrayAppendNull(out->array.children[a], 1);
+    return VgiArrayAppendValue(out->array.children[a], out->schema.children[a],
+                               source->view.children[b], source->schema.children[b], 0, error);
 }
 static void catalog_reset(struct Catalog *c) {
     free(c->name);
@@ -306,6 +316,24 @@ static int append_encoded(struct ArrowArray *list, const struct VgiBatch *batch,
     ArrowBufferReset(&bytes);
     return rc;
 }
+/* Captured descriptors may predate the current record layout, so re-encode one as
+ * the generated record (wire 2.2 dictionary-encodes FunctionInfo's schemas and
+ * drops SchemaInfo's attach cookie). Fields are matched by name. */
+static int append_record(struct ArrowArray *list, const char *record, struct ArrowStringView bytes,
+                         struct ArrowError *error) {
+    struct VgiBatch source = {0}, target = {0};
+    int rc =
+        VgiBatchDecode(&source, (struct ArrowBufferView){{bytes.data}, bytes.size_bytes}, error);
+    if (!rc) rc = VgiBatchInitNamed(&target, record, error);
+    if (!rc)
+        rc = VgiArrayAppendValue(&target.array, &target.schema, &source.view, &source.schema, 0,
+                                 error);
+    if (!rc) rc = VgiBatchFinish(&target, error);
+    if (!rc) rc = append_encoded(list, &target, error);
+    VgiBatchReset(&source);
+    VgiBatchReset(&target);
+    return rc;
+}
 static int clone_with_cookie(const struct VgiBatch *source, struct ArrowStringView cookie,
                              const char *data_version, const char *impl_version,
                              struct VgiBatch *out, struct ArrowError *error) {
@@ -439,7 +467,7 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
     *handled = 0;
     if (!service || !service->count) return 0;
     const char *method = call->method->name;
-    struct VgiBatch request = {0}, result = {0}, item = {0}, schema_info = {0};
+    struct VgiBatch request = {0}, result = {0}, item = {0};
     struct Catalog *catalog = NULL, selected = {0};
     int rc = 0;
     if (!strcmp(method, "catalog_catalogs")) {
@@ -548,14 +576,17 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                 rc = VgiRpcFail(call, "ValueError", "INTERNAL", "",
                                 "contents_broken: catalog_contents deliberately fails");
             else {
-                rc = VgiBatchInit(&result, &catalog->contents.schema, &call->error);
-                for (int64_t i = 0; !rc && i < result.schema.n_children; ++i) {
-                    if (strcmp(result.schema.children[i]->name, "schemas"))
-                        rc = VgiArrayAppendValue(
-                            result.array.children[i], result.schema.children[i],
-                            catalog->contents.view.children[i],
-                            catalog->contents.schema.children[i], 0, &call->error);
-                }
+                struct ArrowBuffer collections[VGI_CATALOG_COLLECTIONS];
+                rc = VgiCatalogCollections(&catalog->contents, collections, &call->error);
+                if (!rc) rc = VgiBatchInitNamed(&result, "CatalogContentsResult", &call->error);
+                if (!rc)
+                    rc = VgiBatchSetInt(&result, "catalog_version",
+                                        VgiBatchInt(&catalog->contents, "catalog_version", 1));
+                if (!rc) rc = copy_value(&result, &catalog->contents, "etag", &call->error);
+                if (!rc) rc = VgiBatchSetInt(&result, "not_modified", 0);
+                if (!rc) rc = VgiCatalogCollectionsSet(&result, collections);
+                if (!rc) rc = VgiBatchFinishRow(&result, &call->error);
+                VgiCatalogCollectionsReset(collections);
             }
         } else if (call->method->payload) {
             struct ArrowSchema schema = {0};
@@ -574,8 +605,7 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                 info_id = entry_schema ? VgiFieldIndex(entry_schema, "schema") : -1;
         const struct ArrowArrayView *requested_path = VgiBatchGet(&call->request, "schema_path");
         if (!requested_path) requested_path = VgiBatchGet(&call->request, "path");
-        int contents = !strcmp(method, "catalog_contents"),
-            schemas = !strcmp(method, "catalog_schemas") || !strcmp(method, "catalog_schema_get");
+        int schemas = !strcmp(method, "catalog_schemas") || !strcmp(method, "catalog_schema_get");
         const char *kind = NULL;
         if (strstr(method, "tables") || !strcmp(method, "catalog_table_get"))
             kind = "tables";
@@ -591,44 +621,16 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                    : kind_is(VgiBatchString(&call->request, "type"), "AGGREGATE")
                        ? "aggregate_functions"
                        : "table_functions";
-        struct ArrowStringView cookie = VgiBatchString(&call->request, "attach_opaque_data");
-        if (contents || schemas || kind) {
+        if (!strcmp(method, "catalog_contents")) {
+            /* Answered above from the whole contents. */
+        } else if (schemas || kind) {
             for (int64_t row = 0; !rc && entries && row < entries->length; ++row) {
                 if (requested_path && !path_equal(entries->children[path_id], row, requested_path))
                     continue;
-                struct ArrowStringView info = VgiValueString(entries->children[info_id], row);
-                rc = VgiBatchDecode(&schema_info,
-                                    (struct ArrowBufferView){{info.data}, info.size_bytes},
-                                    &call->error);
-                if (!rc)
-                    rc = clone_with_cookie(&schema_info, cookie, NULL, NULL, &item, &call->error);
-                VgiBatchReset(&schema_info);
-                if (!rc && schemas)
-                    rc = append_encoded(VgiBatchColumn(&result, "items"), &item, &call->error);
-                if (!rc && contents) {
-                    struct ArrowArray *records = VgiBatchColumn(&result, "schemas")->children[0];
-                    const struct ArrowSchema *record_schema =
-                        result.schema.children[VgiFieldIndex(&result.schema, "schemas")]
-                            ->children[0];
-                    for (int64_t col = 0; !rc && col < entry_schema->n_children; ++col) {
-                        if (col == info_id) {
-                            struct ArrowBuffer bytes;
-                            ArrowBufferInit(&bytes);
-                            rc = encode(&item, &bytes, &call->error);
-                            if (!rc)
-                                rc = ArrowArrayAppendBytes(
-                                    records->children[col],
-                                    (struct ArrowBufferView){{bytes.data}, bytes.size_bytes});
-                            ArrowBufferReset(&bytes);
-                        } else
-                            rc = VgiArrayAppendValue(
-                                records->children[col], record_schema->children[col],
-                                entries->children[col], entry_schema->children[col], row,
-                                &call->error);
-                    }
-                    if (!rc) rc = ArrowArrayFinishElement(records);
-                }
-                VgiBatchReset(&item);
+                if (schemas)
+                    rc = append_record(VgiBatchColumn(&result, "items"), "SchemaInfo",
+                                       VgiValueString(entries->children[info_id], row),
+                                       &call->error);
                 if (!rc && kind) {
                     int64_t id = VgiFieldIndex(entry_schema, kind);
                     const struct ArrowArrayView *items = entries->children[id];
@@ -647,16 +649,17 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                             VgiBatchReset(&item);
                             if (!rc && !match) continue;
                         }
-                        if (!rc)
+                        if (!rc && strstr(kind, "functions"))
+                            rc = append_record(VgiBatchColumn(&result, "items"), "FunctionInfo",
+                                               data, &call->error);
+                        else if (!rc)
                             rc = ArrowArrayAppendBytes(
                                 VgiBatchColumn(&result, "items")->children[0],
                                 (struct ArrowBufferView){{data.data}, data.size_bytes});
                     }
                 }
             }
-            if (!rc)
-                rc = ArrowArrayFinishElement(
-                    VgiBatchColumn(&result, contents ? "schemas" : "items"));
+            if (!rc) rc = ArrowArrayFinishElement(VgiBatchColumn(&result, "items"));
         } else if (!strcmp(method, "catalog_table_scan_function_get") ||
                    !strcmp(method, "catalog_table_scan_branches_get")) {
             int found = 0;
@@ -695,11 +698,145 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
     VgiBatchReset(&request);
     VgiBatchReset(&result);
     VgiBatchReset(&item);
-    VgiBatchReset(&schema_info);
     return rc;
 }
 
 const struct VgiBatch *VgiCatalogInfo(struct VgiCatalogService *s, const char *name) {
     struct Catalog *c = s ? find(s, name) : NULL;
     return c ? &c->info : NULL;
+}
+
+/* Wire 2.2 answers catalog_contents with six catalog-wide collections, each one
+ * Arrow IPC stream of its record type, rather than the per-schema layout the
+ * declarative contents keep. Order follows vgi-python's encode_inventory:
+ * parents before children, then each schema's objects by source list. */
+static const char *const collection_names[VGI_CATALOG_COLLECTIONS] = {
+    "schemas", "tables", "views", "functions", "macros", "indexes"};
+static const char *const collection_records[VGI_CATALOG_COLLECTIONS] = {
+    "SchemaInfo", "TableInfo", "ViewInfo", "FunctionInfo", "MacroInfo", "IndexInfo"};
+static const struct {
+    const char *source;
+    int collection;
+} collection_sources[] = {{"tables", 1},
+                          {"views", 2},
+                          {"indexes", 5},
+                          {"scalar_functions", 3},
+                          {"aggregate_functions", 3},
+                          {"table_functions", 3},
+                          {"scalar_macros", 4},
+                          {"table_macros", 4}};
+static int append_row(struct VgiBatch *records, struct ArrowStringView bytes,
+                      struct ArrowError *error) {
+    struct VgiBatch source = {0};
+    int rc =
+        VgiBatchDecode(&source, (struct ArrowBufferView){{bytes.data}, bytes.size_bytes}, error);
+    for (int64_t i = 0; !rc && i < source.array.length; ++i)
+        rc = VgiArrayAppendValue(&records->array, &records->schema, &source.view, &source.schema, i,
+                                 error);
+    VgiBatchReset(&source);
+    return rc;
+}
+int VgiCatalogContentsInit(struct VgiBatch *out, struct ArrowError *error) {
+    struct ArrowSchema schema = {0}, *entry = NULL;
+    ArrowSchemaInit(&schema);
+    int rc = ArrowSchemaSetTypeStruct(&schema, 2);
+    if (!rc) rc = ArrowSchemaSetType(schema.children[0], NANOARROW_TYPE_INT64);
+    if (!rc) rc = ArrowSchemaSetName(schema.children[0], "catalog_version");
+    if (!rc) schema.children[0]->flags = 0;
+    if (!rc) rc = ArrowSchemaSetFormat(schema.children[1], "+l");
+    if (!rc) rc = ArrowSchemaSetName(schema.children[1], "schemas");
+    if (!rc) rc = ArrowSchemaAllocateChildren(schema.children[1], 1);
+    if (!rc) {
+        schema.children[1]->flags = 0;
+        entry = schema.children[1]->children[0];
+        rc = VgiSchemaInit("SchemaContents", entry, error);
+    }
+    if (!rc) rc = ArrowSchemaSetName(entry, "item");
+    if (!rc) rc = VgiBatchInit(out, &schema, error);
+    if (schema.release) ArrowSchemaRelease(&schema);
+    return rc;
+}
+int VgiCatalogCollections(const struct VgiBatch *contents,
+                          struct ArrowBuffer out[VGI_CATALOG_COLLECTIONS],
+                          struct ArrowError *error) {
+    struct VgiBatch records[VGI_CATALOG_COLLECTIONS];
+    memset(records, 0, sizeof(records));
+    int rc = 0;
+    for (int i = 0; i < VGI_CATALOG_COLLECTIONS; ++i) {
+        ArrowBufferInit(&out[i]);
+        if (!rc) rc = VgiBatchInitNamed(&records[i], collection_records[i], error);
+    }
+    int64_t field = VgiFieldIndex(&contents->schema, "schemas");
+    const struct ArrowArrayView *list = field < 0 ? NULL : contents->view.children[field],
+                                *entries = list ? list->children[0] : NULL;
+    const struct ArrowSchema *type = list ? contents->schema.children[field]->children[0] : NULL;
+    int64_t path_id = type ? VgiFieldIndex(type, "path") : -1,
+            info_id = type ? VgiFieldIndex(type, "schema") : -1;
+    if (!rc && entries && (path_id < 0 || info_id < 0)) rc = EINVAL;
+    int64_t first = entries ? ArrowArrayViewListChildOffset(list, 0) : 0,
+            last = entries ? ArrowArrayViewListChildOffset(list, 1) : 0, remaining = last - first;
+    for (int64_t depth = 0; !rc && remaining > 0; ++depth) {
+        for (int64_t row = first; !rc && row < last; ++row) {
+            const struct ArrowArrayView *path = entries->children[path_id];
+            if (ArrowArrayViewListChildOffset(path, row + 1) -
+                    ArrowArrayViewListChildOffset(path, row) !=
+                depth)
+                continue;
+            --remaining;
+            rc = append_row(&records[0], VgiValueString(entries->children[info_id], row), error);
+            for (size_t s = 0; !rc && s < sizeof(collection_sources) / sizeof(*collection_sources);
+                 ++s) {
+                int64_t id = VgiFieldIndex(type, collection_sources[s].source);
+                if (id < 0) continue;
+                const struct ArrowArrayView *items = entries->children[id];
+                for (int64_t j = ArrowArrayViewListChildOffset(items, row);
+                     !rc && j < ArrowArrayViewListChildOffset(items, row + 1); ++j)
+                    rc = append_row(&records[collection_sources[s].collection],
+                                    VgiValueString(items->children[0], j), error);
+            }
+        }
+    }
+    for (int i = 0; !rc && i < VGI_CATALOG_COLLECTIONS; ++i) {
+        if (!records[i].array.length) continue;
+        rc = VgiBatchFinish(&records[i], error);
+        if (!rc) rc = VgiIpcWriteBatch(&records[i].schema, &records[i].array, NULL, &out[i], error);
+    }
+    for (int i = 0; i < VGI_CATALOG_COLLECTIONS; ++i) VgiBatchReset(&records[i]);
+    if (rc) VgiCatalogCollectionsReset(out);
+    return rc;
+}
+void VgiCatalogCollectionsReset(struct ArrowBuffer collections[VGI_CATALOG_COLLECTIONS]) {
+    for (int i = 0; i < VGI_CATALOG_COLLECTIONS; ++i) ArrowBufferReset(&collections[i]);
+}
+int VgiCatalogCollectionsSet(struct VgiBatch *result,
+                             const struct ArrowBuffer collections[VGI_CATALOG_COLLECTIONS]) {
+    int rc = 0;
+    for (int i = 0; !rc && i < VGI_CATALOG_COLLECTIONS; ++i)
+        rc = collections[i].size_bytes
+                 ? VgiBatchSetBytes(result, collection_names[i], collections[i].data,
+                                    collections[i].size_bytes)
+                 : VgiBatchSetNull(result, collection_names[i]);
+    return rc;
+}
+void VgiCatalogCollectionsDigest(const struct ArrowBuffer collections[VGI_CATALOG_COLLECTIONS],
+                                 char hex[65]) {
+    static const char prefix[] = "vgi.catalog.contents.2.2";
+    crypto_hash_sha256_state state;
+    crypto_hash_sha256_init(&state);
+    crypto_hash_sha256_update(&state, (const unsigned char *)prefix, sizeof(prefix));
+    for (int i = 0; i < VGI_CATALOG_COLLECTIONS; ++i) {
+        const struct ArrowBuffer *data = &collections[i];
+        unsigned char present = data->size_bytes > 0, length[8];
+        crypto_hash_sha256_update(&state, (const unsigned char *)collection_names[i],
+                                  strlen(collection_names[i]) + 1);
+        crypto_hash_sha256_update(&state, &present, 1);
+        if (!present) continue;
+        for (int b = 0; b < 8; ++b)
+            length[b] = (unsigned char)((uint64_t)data->size_bytes >> (8 * b));
+        crypto_hash_sha256_update(&state, length, sizeof(length));
+        crypto_hash_sha256_update(&state, data->data, (unsigned long long)data->size_bytes);
+    }
+    unsigned char hash[32];
+    crypto_hash_sha256_final(&state, hash);
+    sodium_bin2hex(hex, 65, hash, sizeof(hash));
 }

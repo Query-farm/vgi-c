@@ -15,7 +15,7 @@ The reusable transport, IPC, reflection, identity, and native client layer is
 library and owns VGI-specific worker behavior. See [the documentation](docs/index.md)
 for the split and build options.
 
-The SDK targets the `vgi-c++` VGI 2.1.0 behavior, with schemas generated from
+The SDK targets the `vgi-c++` VGI 2.2.0 behavior, with schemas generated from
 `vgi-python`. It implements scalar and table functions, streaming exchanges,
 buffered functions, grouped/window/streaming aggregates, immutable and mutable
 catalogs, version negotiation and time travel, attach options, settings and

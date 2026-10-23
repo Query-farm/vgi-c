@@ -140,7 +140,7 @@ static int schema_sort(const void *a, const void *b) {
     return n == m ? path_compare(x, 0, y, 0, 0) : (n > m) - (n < m);
 }
 static int snapshot_encode(struct Snapshot *s, struct VgiBatch *out, struct ArrowError *error) {
-    int rc = VgiBatchInitNamed(out, "CatalogContentsResult", error);
+    int rc = VgiCatalogContentsInit(out, error);
     if (!rc) rc = VgiBatchSetInt(out, "catalog_version", s->version);
     struct ArrowArray *list = VgiBatchColumn(out, "schemas"),
                       *entry = list ? list->children[0] : NULL;
@@ -385,21 +385,13 @@ static int store_batch(struct VgiStorage *store, struct ArrowBufferView scope,
 static int contents_reply(struct Memory *memory, const struct VgiBatch *contents,
                           struct VgiRpcCall *call, struct VgiRpcReply *reply) {
     char etag[80] = {0};
-    int rc = 0;
-    if (memory->etag == VGI_CATALOG_ETAG_GENERATION)
+    struct ArrowBuffer collections[VGI_CATALOG_COLLECTIONS];
+    int rc = VgiCatalogCollections(contents, collections, &call->error);
+    if (!rc && memory->etag == VGI_CATALOG_ETAG_GENERATION)
         snprintf(etag, sizeof(etag), "gen-%lld",
                  (long long)VgiBatchInt(contents, "catalog_version", 1));
-    else if (memory->etag == VGI_CATALOG_ETAG_CONTENT_HASH) {
-        struct ArrowBuffer bytes;
-        ArrowBufferInit(&bytes);
-        rc = VgiIpcWriteBatch(&contents->schema, &contents->array, NULL, &bytes, &call->error);
-        if (!rc) {
-            unsigned char hash[32];
-            crypto_hash_sha256(hash, bytes.data, (unsigned long long)bytes.size_bytes);
-            sodium_bin2hex(etag, sizeof(etag), hash, sizeof(hash));
-        }
-        ArrowBufferReset(&bytes);
-    }
+    else if (!rc && memory->etag == VGI_CATALOG_ETAG_CONTENT_HASH)
+        VgiCatalogCollectionsDigest(collections, etag);
     int unchanged = etag[0] && is(VgiBatchString(&call->request, "if_none_match"), etag);
     struct VgiBatch result = {0};
     if (!rc) rc = VgiBatchInitNamed(&result, "CatalogContentsResult", &call->error);
@@ -408,10 +400,13 @@ static int contents_reply(struct Memory *memory, const struct VgiBatch *contents
             VgiBatchSetInt(&result, "catalog_version", VgiBatchInt(contents, "catalog_version", 1));
     if (!rc && etag[0]) rc = VgiBatchSetString(&result, "etag", etag);
     if (!rc) rc = VgiBatchSetInt(&result, "not_modified", unchanged);
-    if (!rc && !unchanged) rc = copy_field(&result, "schemas", contents, "schemas", &call->error);
+    /* A not_modified answer carries six null collections. */
+    if (!rc && unchanged) VgiCatalogCollectionsReset(collections);
+    if (!rc) rc = VgiCatalogCollectionsSet(&result, collections);
     if (!rc) rc = VgiBatchFinishRow(&result, &call->error);
     if (!rc) rc = VgiRpcReplyPayload(call, reply, &result);
     VgiBatchReset(&result);
+    VgiCatalogCollectionsReset(collections);
     return rc;
 }
 int VgiMemoryDispatch(struct VgiMemoryService *service, struct VgiCatalogService *catalogs,
@@ -520,6 +515,10 @@ int VgiMemoryDispatch(struct VgiMemoryService *service, struct VgiCatalogService
         if (!rc) rc = VgiRpcReplyPayload(call, reply, &result);
         goto done;
     }
+    if (!rc && !strcmp(method, "catalog_contents")) {
+        rc = contents_reply(memory, &contents, call, reply);
+        goto done;
+    }
     if (!rc)
         rc = VgiCatalogAdd(&temporary, &memory->info, &memory->attach, &contents, NULL,
                            &call->error);
@@ -528,13 +527,6 @@ int VgiMemoryDispatch(struct VgiMemoryService *service, struct VgiCatalogService
         rc = VgiCatalogDispatch(temporary, NULL, call, reply, &served);
         if (!rc && !served)
             rc = failure(call, "This operation is not supported by a metadata catalog");
-    }
-    if (!rc && !strcmp(method, "catalog_contents")) {
-        rc = VgiBatchChild(&reply->value, "result", &result, &call->error);
-        if (!rc) {
-            VgiBatchReset(&reply->value);
-            rc = contents_reply(memory, &result, call, reply);
-        }
     }
 done:
     if (transaction) VgiStorageRollback(store);

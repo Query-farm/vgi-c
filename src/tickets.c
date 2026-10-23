@@ -249,10 +249,13 @@ static int seal_attach(void *state, struct VgiRpcCall *c, struct VgiRpcReply *re
             ArrowBufferReset(&claims.options);
             if (!rc) rc = VgiBatchInitNamed(&payload, "TicketsSealAttachResult", &c->error);
             if (!rc) rc = VgiBatchSetString(&payload, "ticket", (char *)token.data);
-            if (!rc)
-                rc = ArrowArrayAppendDouble(
-                    VgiBatchColumn(&payload, "expires_at"),
-                    claims.expires_at ? (double)claims.expires_at : INFINITY);
+            /* Microseconds since the epoch (UTC); null when the ticket never expires. */
+            struct ArrowArray *expires = VgiBatchColumn(&payload, "expires_at");
+            if (!rc && claims.expires_at > INT64_MAX / 1000000)
+                rc = EINVAL;
+            else if (!rc)
+                rc = claims.expires_at ? ArrowArrayAppendInt(expires, claims.expires_at * 1000000)
+                                       : ArrowArrayAppendNull(expires, 1);
             if (!rc) rc = VgiBatchFinishRow(&payload, &c->error);
             if (!rc) rc = VgiRpcReplyPayload(c, reply, &payload);
         }
