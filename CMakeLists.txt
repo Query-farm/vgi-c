@@ -12,6 +12,8 @@ if(VGI_SANITIZE AND NOT MSVC)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
 endif()
+# Module fallbacks for dependencies some platforms ship without CMake packages.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(VGI_USE_INSTALLED_RPC "Use an installed vgi-rpc-c package" OFF)
 set(VGI_RPC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vgi-rpc-c" CACHE PATH "vgi-rpc-c source checkout")
 if(VGI_USE_INSTALLED_RPC)
@@ -23,6 +25,12 @@ else()
     set(VGI_RPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(VGI_RPC_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     add_subdirectory("${VGI_RPC_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/vgi-rpc")
+endif()
+# CMAKE_C_EXTENSIONS OFF compiles with -std=c11, which on glibc hides the POSIX
+# and BSD declarations (clock_gettime, getline, fdopen, kill, ...) that macOS
+# and the BSDs expose by default. Expose them on Linux too.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_compile_definitions(_DEFAULT_SOURCE)
 endif()
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)

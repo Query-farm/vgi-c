@@ -11,6 +11,10 @@ target_include_directories(vgi-example-worker PRIVATE "${CMAKE_CURRENT_BINARY_DI
 target_link_libraries(vgi-example-worker PRIVATE vgi::vgi)
 target_link_libraries(vgi-example-worker PRIVATE PkgConfig::SODIUM)
 target_link_libraries(vgi-example-worker PRIVATE PkgConfig::JSONC)
+# The worker calls libm directly (pow, hypot, ...); a shared libvgi links it privately.
+if(UNIX)
+    target_link_libraries(vgi-example-worker PRIVATE m)
+endif()
 if(NOT MSVC)
     target_compile_options(vgi-example-worker PRIVATE -Wall -Wextra -Wpedantic)
 endif()
