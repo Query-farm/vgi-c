@@ -78,7 +78,7 @@ int VgiValueRender(const struct ArrowArrayView *value, const struct ArrowSchema 
         snprintf(rendered, sizeof(rendered), "%" PRId64, ArrowArrayViewGetIntUnsafe(value, row));
     else {
         double n;
-        NANOARROW_RETURN_NOT_OK(VgiValueDouble(value, schema, row, &n, error));
+        NANOARROW_RETURN_NOT_OK(VgiValueNumber(value, schema, row, &n, error));
         snprintf(rendered, sizeof(rendered), "%.17g", n);
     }
     return ArrowBufferAppend(text, rendered, strlen(rendered));

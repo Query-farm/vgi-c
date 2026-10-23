@@ -161,7 +161,7 @@ int ExampleBlendedProcess(void *data, struct VgiFunctionCall *call, const struct
                         break;
                     }
                     double value;
-                    rc = VgiValueDouble(input->view.children[i], input->schema.children[i], row,
+                    rc = VgiValueNumber(input->view.children[i], input->schema.children[i], row,
                                         &value, &call->rpc->error);
                     double factor = pow(10, (double)precision);
                     value = round(value * factor) / factor;

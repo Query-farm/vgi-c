@@ -80,12 +80,11 @@ static int from_array(const struct ArrowArrayView *view, const struct ArrowSchem
             out->integer = ArrowArrayViewGetIntUnsafe(view, row);
             out->number = out->integer;
         }
-    } else if (view->storage_type != NANOARROW_TYPE_STRUCT &&
-               view->storage_type != NANOARROW_TYPE_LIST &&
-               view->storage_type != NANOARROW_TYPE_LARGE_LIST) {
-        /* Nested values are read through their children, never as numbers. */
+    } else if (VgiValueIsNumber(view)) {
+        /* Only numbers and decimals are read as numbers. Nested values are read
+         * through their children; intervals, unions and the like never are. */
         double value;
-        if (VgiValueDouble(view, schema, row, &value, NULL)) return EINVAL;
+        if (VgiValueNumber(view, schema, row, &value, NULL)) return EINVAL;
         out->number = value;
     }
     return 0;

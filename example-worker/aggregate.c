@@ -128,7 +128,7 @@ int ExampleAggregateUpdate(void *data, struct VgiFunctionCall *call, const struc
     if (vector_state(f)) {
         double value;
         NANOARROW_RETURN_NOT_OK(
-            VgiValueDouble(first, first_schema, row, &value, &call->rpc->error));
+            VgiValueNumber(first, first_schema, row, &value, &call->rpc->error));
         *present = 1;
         return ArrowBufferAppend(state, &value, sizeof(value));
     }
@@ -141,18 +141,18 @@ int ExampleAggregateUpdate(void *data, struct VgiFunctionCall *call, const struc
                 if (strcmp(input->schema.children[i]->name, "__vgi_group_id") &&
                     !ArrowArrayViewIsNull(input->view.children[i], row)) {
                     double column;
-                    NANOARROW_RETURN_NOT_OK(VgiValueDouble(input->view.children[i],
+                    NANOARROW_RETURN_NOT_OK(VgiValueNumber(input->view.children[i],
                                                            input->schema.children[i], row, &column,
                                                            &call->rpc->error));
                     value += column;
                 }
         } else
             NANOARROW_RETURN_NOT_OK(
-                VgiValueDouble(first, first_schema, row, &value, &call->rpc->error));
+                VgiValueNumber(first, first_schema, row, &value, &call->rpc->error));
         if (named(f, "vgi_weighted_sum")) {
             double weight;
             NANOARROW_RETURN_NOT_OK(
-                VgiValueDouble(second, second_schema, row, &weight, &call->rpc->error));
+                VgiValueNumber(second, second_schema, row, &weight, &call->rpc->error));
             value *= weight;
         }
         value += get_double(view(state));

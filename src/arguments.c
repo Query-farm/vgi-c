@@ -73,7 +73,7 @@ double VgiArgumentDouble(const struct VgiFunctionCall *call, int64_t position, c
     const struct ArrowArrayView *value = VgiArgument(call, position, name);
     const struct ArrowSchema *schema = argument_value_schema(call, value);
     double result;
-    return !schema || VgiValueDouble(value, schema, 0, &result, NULL) ? fallback : result;
+    return !schema || VgiValueNumber(value, schema, 0, &result, NULL) ? fallback : result;
 }
 struct ArrowStringView VgiArgumentString(const struct VgiFunctionCall *call, int64_t position,
                                          const char *name) {

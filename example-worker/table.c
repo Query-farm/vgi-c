@@ -454,7 +454,7 @@ static int exchange(struct ExampleFunction *f, struct VgiFunctionCall *call,
                                 null = 1;
                                 break;
                             }
-                            NANOARROW_RETURN_NOT_OK(VgiValueDouble(input->view.children[col],
+                            NANOARROW_RETURN_NOT_OK(VgiValueNumber(input->view.children[col],
                                                                    input->schema.children[col], row,
                                                                    &value, &call->rpc->error));
                             sum += VgiArgumentInt(call, -1, "absolute", 0) ? fabs(value) : value;

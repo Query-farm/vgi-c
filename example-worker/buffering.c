@@ -131,7 +131,7 @@ static int sum_batch(const struct VgiBatch *input, const struct ArrowSchema *sch
                     integer += (uint64_t)ArrowArrayViewGetIntUnsafe(input->view.children[id], row);
                 else {
                     double value;
-                    NANOARROW_RETURN_NOT_OK(VgiValueDouble(
+                    NANOARROW_RETURN_NOT_OK(VgiValueNumber(
                         input->view.children[id], input->schema.children[id], row, &value, error));
                     floating += value;
                 }

@@ -14,7 +14,8 @@
         }                                                           \
     } while (0)
 static struct ArrowError error;
-static int parse(const char *json, int64_t value, struct VgiFilters **out) {
+static int parse_over(const char *json, int64_t value, const struct ArrowSchema *column,
+                      struct VgiFilters **out) {
     struct VgiBatch batch = {0}, init = {0};
     struct ArrowSchema schema = {0}, input = {0};
     struct ArrowBuffer metadata, ipc;
@@ -41,8 +42,8 @@ static int parse(const char *json, int64_t value, struct VgiFilters **out) {
     CHECK(!VgiIpcWriteBatch(&batch.schema, &batch.array, NULL, &ipc, &error));
     ArrowSchemaInit(&input);
     CHECK(!ArrowSchemaSetTypeStruct(&input, 1));
-    CHECK(!ArrowSchemaSetType(input.children[0], NANOARROW_TYPE_INT64));
-    CHECK(!ArrowSchemaSetName(input.children[0], "x"));
+    ArrowSchemaRelease(input.children[0]);
+    CHECK(!ArrowSchemaDeepCopy(column, input.children[0]));
     int rc = VgiFiltersParse((struct ArrowBufferView){{ipc.data}, ipc.size_bytes}, &input, &init,
                              out, &error);
     ArrowSchemaRelease(&input);
@@ -50,6 +51,15 @@ static int parse(const char *json, int64_t value, struct VgiFilters **out) {
     ArrowBufferReset(&metadata);
     ArrowBufferReset(&ipc);
     VgiBatchReset(&batch);
+    return rc;
+}
+static int parse(const char *json, int64_t value, struct VgiFilters **out) {
+    struct ArrowSchema column = {0};
+    ArrowSchemaInit(&column);
+    CHECK(!ArrowSchemaSetType(&column, NANOARROW_TYPE_INT64));
+    CHECK(!ArrowSchemaSetName(&column, "x"));
+    int rc = parse_over(json, value, &column, out);
+    ArrowSchemaRelease(&column);
     return rc;
 }
 static int apply(struct VgiFilters *filters, int64_t a, int64_t b, int64_t *length) {
@@ -85,7 +95,103 @@ static int apply(struct VgiFilters *filters, int64_t a, int64_t b, int64_t *leng
 #define END "}]}"
 #define COL "{\"node\":\"column_ref\",\"column_index\":0,\"column_name\":\"x\"}"
 #define LIT "{\"node\":\"literal\",\"value_ref\":0}"
+/* Column x of a type that is not a number: DuckDB MAP, ARRAY (fixed-size list)
+ * and INTERVAL. VgiValueDouble must never see these (it reads decimal type
+ * information nanoarrow leaves uninitialized for them). */
+enum Kind { MAP, ARRAY, INTERVAL, INTERVAL_MONTHS };
+static void column_schema(enum Kind kind, struct ArrowSchema *out) {
+    ArrowSchemaInit(out);
+    switch (kind) {
+        case MAP:
+            CHECK(!ArrowSchemaSetType(out, NANOARROW_TYPE_MAP));
+            CHECK(!ArrowSchemaSetType(out->children[0]->children[0], NANOARROW_TYPE_STRING));
+            CHECK(!ArrowSchemaSetType(out->children[0]->children[1], NANOARROW_TYPE_INT64));
+            break;
+        case ARRAY:
+            CHECK(!ArrowSchemaSetTypeFixedSize(out, NANOARROW_TYPE_FIXED_SIZE_LIST, 2));
+            CHECK(!ArrowSchemaSetType(out->children[0], NANOARROW_TYPE_INT32));
+            break;
+        case INTERVAL:
+            CHECK(!ArrowSchemaSetType(out, NANOARROW_TYPE_INTERVAL_MONTH_DAY_NANO));
+            break;
+        case INTERVAL_MONTHS:
+            CHECK(!ArrowSchemaSetType(out, NANOARROW_TYPE_INTERVAL_MONTHS));
+            break;
+    }
+    CHECK(!ArrowSchemaSetName(out, "x"));
+}
+static void append_value(enum Kind kind, struct ArrowArray *x) {
+    switch (kind) {
+        case MAP: {
+            struct ArrowArray *entries = x->children[0];
+            CHECK(!ArrowArrayAppendString(entries->children[0], ArrowCharView("k")));
+            CHECK(!ArrowArrayAppendInt(entries->children[1], 7));
+            CHECK(!ArrowArrayFinishElement(entries));
+            CHECK(!ArrowArrayFinishElement(x));
+            break;
+        }
+        case ARRAY:
+            CHECK(!ArrowArrayAppendInt(x->children[0], 1));
+            CHECK(!ArrowArrayAppendInt(x->children[0], 2));
+            CHECK(!ArrowArrayFinishElement(x));
+            break;
+        case INTERVAL:
+        case INTERVAL_MONTHS: {
+            struct ArrowInterval interval;
+            ArrowIntervalInit(&interval, kind == INTERVAL ? NANOARROW_TYPE_INTERVAL_MONTH_DAY_NANO
+                                                          : NANOARROW_TYPE_INTERVAL_MONTHS);
+            interval.months = 1;
+            interval.days = 2;
+            interval.ns = 3;
+            CHECK(!ArrowArrayAppendInterval(x, &interval));
+            break;
+        }
+    }
+}
+static void check_not_a_number(enum Kind kind) {
+    struct ArrowSchema column = {0}, schema = {0};
+    column_schema(kind, &column);
+    for (int negated = 0; negated < 2; ++negated) {
+        char json[512];
+        snprintf(json, sizeof(json),
+                 "{\"encoding\":\"vgi.filters.v2\",\"semantics\":\"vgi.duckdb.standard.v1\","
+                 "\"kind\":\"snapshot\",\"predicates\":[{\"id\":\"p\",\"revision\":0,"
+                 "\"mode\":\"required\",\"source\":\"query\",\"expression\":{\"node\":"
+                 "\"is_null\",\"expression\":{\"node\":\"column_ref\",\"column_index\":0,"
+                 "\"column_name\":\"x\"},\"negated\":%s}}]}",
+                 negated ? "true" : "false");
+        struct VgiFilters *f = NULL;
+        CHECK(!parse_over(json, 0, &column, &f));
+        ArrowSchemaInit(&schema);
+        CHECK(!ArrowSchemaSetTypeStruct(&schema, 1));
+        ArrowSchemaRelease(schema.children[0]);
+        CHECK(!ArrowSchemaDeepCopy(&column, schema.children[0]));
+        struct VgiBatch input = {0}, output = {0};
+        CHECK(!VgiBatchInit(&input, &schema, &error));
+        /* Rows: value, null, value. */
+        append_value(kind, input.array.children[0]);
+        CHECK(!ArrowArrayFinishElement(&input.array));
+        CHECK(!ArrowArrayAppendNull(input.array.children[0], 1));
+        CHECK(!ArrowArrayFinishElement(&input.array));
+        append_value(kind, input.array.children[0]);
+        CHECK(!ArrowArrayFinishElement(&input.array));
+        CHECK(!VgiBatchFinish(&input, &error));
+        int rc = VgiFiltersApply(f, &input, &output, &error);
+        if (rc) fprintf(stderr, "kind %d: %s\n", (int)kind, error.message);
+        CHECK(rc == 0);
+        CHECK(output.array.length == (negated ? 2 : 1));
+        VgiBatchReset(&output);
+        VgiBatchReset(&input);
+        ArrowSchemaRelease(&schema);
+        VgiFiltersFree(f);
+    }
+    ArrowSchemaRelease(&column);
+}
 int main(void) {
+    check_not_a_number(MAP);
+    check_not_a_number(ARRAY);
+    check_not_a_number(INTERVAL);
+    check_not_a_number(INTERVAL_MONTHS);
     struct VgiFilters *f = NULL;
     int64_t n = 0;
     CHECK(!parse(START "{\"node\":\"comparison\",\"op\":\"eq\",\"left\":" COL ",\"right\":" LIT
@@ -123,6 +229,6 @@ int main(void) {
                  1, &f));
     CHECK(apply(f, INT64_MAX, 0, &n) != 0);
     VgiFiltersFree(f);
-    puts("Filter validation, exact integers, cast bounds, and overflow passed");
+    puts("Filter validation, exact integers, cast bounds, overflow, and non-number columns passed");
     return 0;
 }

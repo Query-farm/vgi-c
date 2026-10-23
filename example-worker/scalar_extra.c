@@ -120,7 +120,7 @@ int ExampleExtraProcess(struct ExampleFunction *function, struct VgiFunctionCall
             }
             char digits[512];
             double number;
-            rc = VgiValueDouble(value, input->schema.children[input->view.n_children - 1], row,
+            rc = VgiValueNumber(value, input->schema.children[input->view.n_children - 1], row,
                                 &number, &call->rpc->error);
             if (rc) break;
             if (!strcmp(function->name, "format_number")) {
