@@ -59,13 +59,13 @@ int ExampleBlendedBind(void *data, struct VgiFunctionCall *call, struct ArrowSch
     }
     return rc;
 }
-static int parent(struct ArrowBuffer *rows, int64_t row) {
+int ExampleParentRow(struct ArrowBuffer *rows, int64_t row) {
     if (row < 0 || row > INT32_MAX) return EOVERFLOW;
     unsigned char bytes[4];
     for (int i = 0; i < 4; ++i) bytes[i] = (uint8_t)((uint64_t)row >> (8 * i));
     return ArrowBufferAppend(rows, bytes, 4);
 }
-static int parents_metadata(struct ArrowBuffer *metadata, const struct ArrowBuffer *rows) {
+int ExampleParentsMetadata(struct ArrowBuffer *metadata, const struct ArrowBuffer *rows) {
     size_t length =
         sodium_base64_ENCODED_LEN((size_t)rows->size_bytes, sodium_base64_VARIANT_ORIGINAL);
     char *encoded = malloc(length);
@@ -95,7 +95,7 @@ static int tensor_rows(struct VgiFunctionCall *call, const struct VgiBatch *inpu
         for (int64_t i = start; !rc && i < end; ++i) {
             rc = VgiArrayAppendValue(&out->array, &out->schema, list->children[0],
                                      cells.schema.children[0]->children[0], i, &call->rpc->error);
-            if (!rc) rc = parent(parents, row);
+            if (!rc) rc = ExampleParentRow(parents, row);
         }
     }
     VgiBatchReset(&cells);
@@ -118,7 +118,7 @@ int ExampleBlendedProcess(void *data, struct VgiFunctionCall *call, const struct
             for (int64_t i = 0; !rc && i < count; ++i) {
                 rc = ArrowArrayAppendInt(out->array.children[0], i);
                 if (!rc) rc = ArrowArrayFinishElement(&out->array);
-                if (!rc) rc = parent(&parents, row);
+                if (!rc) rc = ExampleParentRow(&parents, row);
             }
             continue;
         }
@@ -189,19 +189,19 @@ int ExampleBlendedProcess(void *data, struct VgiFunctionCall *call, const struct
         if (!rc && named(f, "hostile_provenance")) {
             struct ArrowStringView mode = VgiArgumentString(call, -1, "mode");
             int range = !mode.data || (mode.size_bytes == 5 && !memcmp(mode.data, "range", 5));
-            rc = parent(&parents, range ? input->array.length : row);
+            rc = ExampleParentRow(&parents, range ? input->array.length : row);
         }
     }
     if (!rc && named(f, "hostile_provenance")) {
         struct ArrowStringView mode = VgiArgumentString(call, -1, "mode");
         if (mode.data && mode.size_bytes == 6 && !memcmp(mode.data, "length", 6))
-            rc = parent(&parents, 0);
+            rc = ExampleParentRow(&parents, 0);
         if (!rc && mode.data && mode.size_bytes == 6 && !memcmp(mode.data, "base64", 6))
             rc = VgiMetadataSet(metadata, "vgi_rpc.parent_row#b64", "!!!not base64!!!");
         else if (!rc)
-            rc = parents_metadata(metadata, &parents);
+            rc = ExampleParentsMetadata(metadata, &parents);
     } else if (!rc && (named(f, "blended_explode") || named(f, "unnest_tensor_rows")))
-        rc = parents_metadata(metadata, &parents);
+        rc = ExampleParentsMetadata(metadata, &parents);
     if (!rc) rc = VgiBatchFinish(out, &call->rpc->error);
     ArrowBufferReset(&parents);
     return rc;

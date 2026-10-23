@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "catalog_internal.h"
+#include "filter_internal.h"
 #include "memory_catalog_internal.h"
 #include "split_internal.h"
 #include "tickets_internal.h"
@@ -186,6 +187,50 @@ static int append_path(struct ArrowArray *list, const char *path) {
     }
     return ArrowArrayFinishElement(list);
 }
+/* Refuse what the client cannot drive. resume receives no input, so it continues
+ * from the state init creates; a catalog max_workers of 1 runs every pipeline on
+ * one shared connection, which cannot leave output pending. input_rows_per_call
+ * splits the per-row input of a blended function only. */
+static int check_registration(const struct VgiFunction *function, struct ArrowError *error) {
+    struct ArrowStringView name = VgiBatchString(&function->info, "name");
+    if (function->resume && function->kind != VGI_TABLE_IN_OUT) {
+        ArrowErrorSet(error,
+                      "%.*s: resume (continued output) applies only to a table-in-out function",
+                      (int)name.size_bytes, name.data);
+        return EINVAL;
+    }
+    if (function->resume && !function->init) {
+        ArrowErrorSet(error,
+                      "%.*s: resume continues from the state init creates; register an init "
+                      "callback that sets call->state",
+                      (int)name.size_bytes, name.data);
+        return EINVAL;
+    }
+    if (function->resume && !VgiBatchIsNull(&function->info, "max_workers") &&
+        VgiBatchInt(&function->info, "max_workers", 0) == 1) {
+        ArrowErrorSet(error,
+                      "%.*s: resume (continued output) is not supported with max_workers = 1; the "
+                      "client runs such a function on one shared connection",
+                      (int)name.size_bytes, name.data);
+        return EINVAL;
+    }
+    if (!VgiBatchIsNull(&function->info, "input_rows_per_call")) {
+        int64_t rows = VgiBatchInt(&function->info, "input_rows_per_call", 0);
+        if (!VgiBatchInt(&function->info, "input_from_args", 0)) {
+            ArrowErrorSet(error,
+                          "%.*s: input_rows_per_call applies only to a blended (input_from_args) "
+                          "function, whose per-row input the client can split into calls",
+                          (int)name.size_bytes, name.data);
+            return EINVAL;
+        }
+        if (rows < 1) {
+            ArrowErrorSet(error, "%.*s: input_rows_per_call must be a positive integer, got %lld",
+                          (int)name.size_bytes, name.data, (long long)rows);
+            return EINVAL;
+        }
+    }
+    return 0;
+}
 int VgiWorkerRegisterFunction(struct VgiWorker *worker, struct VgiFunction *function,
                               struct ArrowError *error) {
     if (!worker || !function || !function->info.array.release) return EINVAL;
@@ -200,6 +245,7 @@ int VgiWorkerRegisterFunction(struct VgiWorker *worker, struct VgiFunction *func
     struct ArrowArray *schema_path = VgiBatchColumn(&function->info, "schema_path");
     if (!rc && !schema_path->length) rc = append_path(schema_path, path);
     if (!rc && !function->info.array.length) rc = VgiBatchFinishRow(&function->info, error);
+    if (!rc) rc = check_registration(function, error);
     if (rc) return rc;
     struct RegisteredFunction owned = {0};
     owned.catalog = text_copy(catalog);
@@ -727,7 +773,60 @@ static int bind_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
 struct FunctionStream {
     struct VgiFunctionCall context;
     struct VgiFunction *function;
+    /* The last reply said HAVE_MORE_OUTPUT, so the next input must be a tick.
+     * Kept with the stream, which serves every turn on each transport. */
+    int more_pending;
 };
+#define VGI_STATUS_KEY "vgi.status"
+static int refuse(struct VgiRpcCall *rpc, struct ArrowStringView name, const char *reason) {
+    char message[256];
+    snprintf(message, sizeof(message), "%.*s: %s", (int)name.size_bytes, name.data, reason);
+    return VgiRpcFail(rpc, "RuntimeError", "FAILED_PRECONDITION", "", message);
+}
+static int has_cache_control(const struct ArrowBuffer *metadata) {
+    struct ArrowMetadataReader reader;
+    struct ArrowStringView key, value;
+    if (!metadata->data || ArrowMetadataReaderInit(&reader, (const char *)metadata->data)) return 0;
+    while (reader.remaining_keys > 0 && !ArrowMetadataReaderRead(&reader, &key, &value))
+        if (key.size_bytes >= 10 && !memcmp(key.data, "vgi.cache.", 10)) return 1;
+    return 0;
+}
+/* Keep the parent_row entries of the rows an auto-applied filter kept. */
+static int filter_parent_rows(struct ArrowBuffer *metadata, const struct ArrowBuffer *kept,
+                              int64_t rows) {
+    static const char key[] = "vgi_rpc.parent_row#b64";
+    struct ArrowStringView encoded =
+        VgiMetadataGet(metadata->data ? (const char *)metadata->data : NULL, key);
+    if (!encoded.data) return 0;
+    size_t length = (size_t)encoded.size_bytes, size = 0;
+    unsigned char *parents = malloc(length + 1);
+    if (!parents) return ENOMEM;
+    int rc = sodium_base642bin(parents, length + 1, encoded.data, length, NULL, &size, NULL,
+                               sodium_base64_VARIANT_ORIGINAL)
+                 ? EINVAL
+                 : 0;
+    /* Malformed provenance is left for the client to reject. */
+    if (rc || (int64_t)size != rows * 4) {
+        free(parents);
+        return 0;
+    }
+    const int64_t *rows_kept = (const int64_t *)kept->data;
+    int64_t count = kept->size_bytes / (int64_t)sizeof(int64_t);
+    for (int64_t i = 0; i < count; ++i) memmove(parents + 4 * i, parents + 4 * rows_kept[i], 4);
+    size_t capacity =
+        sodium_base64_ENCODED_LEN((size_t)(4 * count), sodium_base64_VARIANT_ORIGINAL);
+    char *text = malloc(capacity);
+    if (!text)
+        rc = ENOMEM;
+    else {
+        sodium_bin2base64(text, capacity, parents, (size_t)(4 * count),
+                          sodium_base64_VARIANT_ORIGINAL);
+        rc = VgiMetadataSet(metadata, key, text);
+    }
+    free(text);
+    free(parents);
+    return rc;
+}
 static int function_next(void *state, struct VgiRpcCall *rpc, const struct VgiBatch *input,
                          const char *metadata, struct VgiBatch *output,
                          struct ArrowBuffer *output_metadata, int *finished) {
@@ -761,17 +860,54 @@ static int function_next(void *state, struct VgiRpcCall *rpc, const struct VgiBa
         ArrowBufferReset(&decoded);
         if (delta_rc) return delta_rc;
     }
-    if (!fn->process)
+    /* Continued output: a reply that says more (HAVE_MORE_OUTPUT) is followed by a
+     * tick, a zero-row input carrying vgi.status: CONTINUE, which resume answers.
+     * While output is pending a tick is the only valid input, and a tick is valid
+     * only then. Every reply of an input indexes that input's rows. */
+    int tick = text_is(VgiMetadataGet(metadata, VGI_STATUS_KEY), "CONTINUE");
+    struct ArrowStringView name = VgiBatchString(&fn->info, "name");
+    if (tick && !stream->more_pending)
+        return refuse(rpc, name, "continuation tick received, but no output is pending");
+    if (tick && input->array.length)
+        return refuse(rpc, name, "a continuation tick must have no rows");
+    if (!tick && stream->more_pending)
+        return refuse(rpc, name,
+                      "input received while output is pending; expected a continuation tick");
+    stream->context.more_output = 0;
+    int rc;
+    if (tick)
+        rc = fn->resume(fn->userdata, &stream->context, output, output_metadata);
+    else if (fn->process)
+        rc = fn->process(fn->userdata, &stream->context, input, output, output_metadata, finished);
+    else
         return VgiRpcFail(rpc, "MethodNotImplementedError", "UNIMPLEMENTED",
                           "method_not_implemented", "Function has no process callback");
-    int rc = fn->process(fn->userdata, &stream->context, input, output, output_metadata, finished);
+    int more = !rc && stream->context.more_output;
+    if (more && fn->kind != VGI_TABLE_IN_OUT)
+        rc = refuse(rpc, name,
+                    "more output is only valid in a table-in-out function's process or resume");
+    else if (more && !fn->resume)
+        rc = refuse(rpc, name, "set more output but has no resume callback");
+    else if (more && *finished)
+        rc = refuse(rpc, name, "set more output on a finished stream");
+    else if (!rc && (more || tick) && !output->array.release)
+        rc = refuse(rpc, name, "every reply of continued output must carry a batch");
+    else if (!rc && tick && has_cache_control(output_metadata))
+        rc = refuse(rpc, name,
+                    "cache control may only ride an input's first reply, not a continuation");
     if (!rc && !*finished && fn->auto_apply_filters && stream->context.filters) {
         struct VgiBatch filtered = {0};
-        rc = VgiFiltersApply(stream->context.filters, output, &filtered, &rpc->error);
+        struct ArrowBuffer kept;
+        ArrowBufferInit(&kept);
+        rc = VgiFiltersSelect(stream->context.filters, output, &filtered, &kept, &rpc->error);
+        /* Provenance is per output row, so it must lose the rows the filter does. */
+        if (!rc) rc = filter_parent_rows(output_metadata, &kept, output->array.length);
         if (!rc) {
             VgiBatchReset(output);
             *output = filtered;
-        }
+        } else
+            VgiBatchReset(&filtered);
+        ArrowBufferReset(&kept);
     }
     if (!rc && !*finished && (fn->kind == VGI_TABLE || fn->kind == VGI_TABLE_IN_OUT)) {
         struct VgiBatch projected = {0};
@@ -781,6 +917,9 @@ static int function_next(void *state, struct VgiRpcCall *rpc, const struct VgiBa
             *output = projected;
         }
     }
+    if (!rc && more) rc = VgiMetadataSet(output_metadata, VGI_STATUS_KEY, "HAVE_MORE_OUTPUT");
+    /* An error ends the stream; the client discards the connection. */
+    stream->more_pending = more && !rc;
     if (rc && !rpc->error.message[0])
         ArrowErrorSet(&rpc->error, "Function process failed (error %d)", rc);
     if (!rc && !*finished && fn->kind == VGI_SCALAR && output->array.length != input->array.length)

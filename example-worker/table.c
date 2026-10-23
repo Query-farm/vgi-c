@@ -19,7 +19,8 @@ int ExampleTableSupported(const char *name) {
         ExampleStaticSupported(name) || ExamplePartitionSupported(name) ||
         ExampleSplitSupported(name) || ExampleFilterSupported(name) ||
         ExampleTableExtraSupported(name) || ExampleCacheSupported(name) ||
-        ExampleBlendedSupported(name) || ExampleContextSupported(name))
+        ExampleBlendedSupported(name) || ExampleContextSupported(name) ||
+        ExamplePagedSupported(name))
         return 1;
     const char *names[] = {"sequence",
                            "double_sequence",
@@ -46,7 +47,7 @@ int ExampleTableSupported(const char *name) {
 int ExampleTableIsExchange(const char *name) {
     return !strcmp(name, "slow_cancellable_inout") || ExampleCacheExchange(name) ||
            !strcmp(name, "filter_by_setting") || !strcmp(name, "secret_in_out") ||
-           ExampleBlendedSupported(name) || !strcmp(name, "echo") ||
+           ExampleBlendedSupported(name) || ExamplePagedSupported(name) || !strcmp(name, "echo") ||
            !strcmp(name, "echo_witness") || !strcmp(name, "repeat_inputs") ||
            !strcmp(name, "test_same_name_transform") || !strcmp(name, "row_sum") ||
            !strcmp(name, "blended_drop");

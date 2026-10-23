@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "filter_internal.h"
 #include "vgi/context.h"
 #include "vgi/rpc.h"
 
@@ -992,6 +993,10 @@ int VgiFiltersApplyDelta(struct VgiFilters *f, struct ArrowBufferView bytes,
 }
 int VgiFiltersApply(const struct VgiFilters *f, const struct VgiBatch *input,
                     struct VgiBatch *output, struct ArrowError *error) {
+    return VgiFiltersSelect(f, input, output, NULL, error);
+}
+int VgiFiltersSelect(const struct VgiFilters *f, const struct VgiBatch *input,
+                     struct VgiBatch *output, struct ArrowBuffer *kept, struct ArrowError *error) {
     int rc = VgiBatchInit(output, &input->schema, error);
     size_t count = f ? f->n_items : 0;
     for (int64_t row = 0; !rc && row < input->array.length; ++row) {
@@ -1015,6 +1020,7 @@ int VgiFiltersApply(const struct VgiFilters *f, const struct VgiBatch *input,
         if (!rc && keep)
             rc = VgiArrayAppendValue(&output->array, &output->schema, &input->view, &input->schema,
                                      row, error);
+        if (!rc && keep && kept) rc = ArrowBufferAppendInt64(kept, row);
     }
     if (!rc) rc = VgiBatchFinish(output, error);
     if (rc) VgiBatchReset(output);

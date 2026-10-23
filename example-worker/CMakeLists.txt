@@ -6,7 +6,7 @@ file(READ "${CMAKE_CURRENT_SOURCE_DIR}/generated/fixtures.arrow" FIXTURE_HEX HEX
 string(REGEX REPLACE "(..)" "0x\\1," FIXTURE_HEX "${FIXTURE_HEX}")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/fixture_data.h" "static const unsigned char fixture_data[] = {${FIXTURE_HEX}};\n")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/generated/fixtures.arrow")
-add_executable(vgi-example-worker main.c fixtures.c scalar.c scalar_extra.c tensor.c aggregate.c nest_tensor.c table.c buffering.c blended.c context.c cache.c catalog_dynamic.c table_extra.c filter_fixtures.c splits.c partitioned.c static_scans.c fixture_paths.c copy_fixtures.c accumulate.c secondary.c identity_fixture.c cancellable.c)
+add_executable(vgi-example-worker main.c fixtures.c scalar.c scalar_extra.c tensor.c aggregate.c nest_tensor.c table.c buffering.c blended.c paged.c context.c cache.c catalog_dynamic.c table_extra.c filter_fixtures.c splits.c partitioned.c static_scans.c fixture_paths.c copy_fixtures.c accumulate.c secondary.c identity_fixture.c cancellable.c)
 target_include_directories(vgi-example-worker PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(vgi-example-worker PRIVATE vgi::vgi)
 target_link_libraries(vgi-example-worker PRIVATE PkgConfig::SODIUM)

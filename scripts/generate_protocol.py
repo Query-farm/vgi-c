@@ -21,6 +21,7 @@ from typing import Any, TextIO
 import pyarrow as pa
 from pyarrow.cffi import ffi
 from vgi.attach_ticket import AttachTickets, SealAttachRequest
+from vgi.catalog.contract import catalog_contract_hash
 from vgi.codegen._common import (
     EXTRA_RESPONSE_TYPES,
     REQUEST_TYPES,
@@ -114,6 +115,8 @@ extern const size_t VGI_METHOD_COUNT;
     header.write(f"#define VGI_PROTOCOL_NAME {_literal(VgiProtocol.protocol_name)}\n")
     header.write(f"#define VGI_PROTOCOL_VERSION {_literal(VgiProtocol.protocol_version)}\n")
     header.write(f"#define VGI_PROTOCOL_HASH {_literal(preimage_hash(VgiProtocol.protocol_name, methods))}\n")
+    # Also covers the nested catalog record schemas, which the method hash cannot see.
+    header.write(f"#define VGI_CATALOG_CONTRACT_HASH {_literal(catalog_contract_hash())}\n")
     for protocol, _prefix, constant in (
         (AttachTickets, "Tickets", "TICKETS"),
     ):

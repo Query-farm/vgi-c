@@ -39,7 +39,7 @@ The native dependencies are nanoarrow IPC, json-c, libsodium, SQLite3,
 libevent, libcurl, zstd, LZ4, zlib, and platform threads. Python and the C++ worker are
 used only for generation and compatibility testing. The example worker's
 checked-in Arrow files contain declarative reference metadata; function
-execution and catalog state are implemented in C. All 267 captured function
+execution and catalog state are implemented in C. All 270 captured function
 signatures have registered implementations; startup rejects an unsupported
 fixture instead of silently advertising it.
 
@@ -218,6 +218,18 @@ opt in to trusted test identities.
 schema. Process callbacks receive a borrowed input batch and return an owned
 output batch and Arrow message metadata. Set `finished` to emit EOS.
 `finalize` releases execution state on completion, cancellation, or failure.
+
+A table-in-out function may answer one input with several replies, such as one
+upstream API page per reply. `process` (or `resume`) sets `call->more_output`;
+the reply then says `vgi.status: HAVE_MORE_OUTPUT`, and the client asks for the
+next with a continuation tick that the worker answers through `resume`. Keep the
+position to continue from in `call->state`, created by `init`; the stream keeps
+it between turns on every transport, so keep it small. Registration requires
+`init` with `resume` and refuses a catalog `max_workers` of 1. Ticks are strict:
+a tick with nothing pending, a tick with rows, real input while output is
+pending, and cache control on a tick's reply fail the stream. A blended function
+may set FunctionInfo `input_rows_per_call` (a positive integer) to cap the input
+rows of one call; the client splits each chunk accordingly.
 
 `VgiFunctionCall` exposes decoded arguments, settings, secrets, the output
 schema, execution ID, per-execution storage, and current filter state.

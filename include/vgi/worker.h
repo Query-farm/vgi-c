@@ -28,6 +28,10 @@ struct VgiFunctionCall {
     /* Borrowed Arrow metadata for the current input batch. */
     const char *input_metadata;
     void *state;
+    /* Table-in-out only: set by process or resume when this input has more
+     * output. The reply says HAVE_MORE_OUTPUT, and the framework calls resume
+     * for each next batch until one is returned without it. Reset per call. */
+    int more_output;
 };
 enum VgiFunctionKind { VGI_SCALAR, VGI_TABLE, VGI_TABLE_IN_OUT, VGI_AGGREGATE, VGI_BUFFERING };
 struct VgiFunction {
@@ -66,6 +70,14 @@ struct VgiFunction {
                              struct ArrowBuffer *target, struct ArrowBufferView source);
     int (*aggregate_finalize)(void *userdata, struct VgiFunctionCall *call,
                               const struct ArrowBufferView *state, struct VgiBatch *output);
+    /* Table-in-out continued output: return the next batch for the last input,
+     * which process answered with more_output set. There is no input; every
+     * position to continue from lives in call->state, which init creates. Each
+     * call returns exactly one batch; its parent rows index the last input, and
+     * it may not carry cache control. Registration requires init and refuses a
+     * catalog max_workers of 1 (one connection shared by every pipeline). */
+    int (*resume)(void *userdata, struct VgiFunctionCall *call, struct VgiBatch *output,
+                  struct ArrowBuffer *metadata);
 };
 
 /* Function info remains a builder until registration: set any generated

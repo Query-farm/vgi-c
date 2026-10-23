@@ -222,6 +222,13 @@ int ExampleRegister(struct VgiWorker *worker, struct ArrowError *error) {
                 !strcmp(data->name, "cache_filtered") || !strcmp(data->name, "sequence") ||
                 !strcmp(data->name, "double_sequence");
         }
+        if (ExamplePagedSupported(data->name)) {
+            function.bind = ExamplePagedBind;
+            function.init = ExamplePagedInit;
+            function.process = ExamplePagedProcess;
+            function.resume = ExamplePagedResume;
+            function.finalize = ExamplePagedFree;
+        }
         if (buffering) {
             function.kind = kind.size_bytes == 5 ? VGI_TABLE_IN_OUT : VGI_BUFFERING;
             function.bind = ExampleBufferBind;

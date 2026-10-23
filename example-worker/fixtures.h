@@ -53,6 +53,16 @@ int ExampleBlendedSupported(const char *name);
 int ExampleBlendedBind(void *data, struct VgiFunctionCall *call, struct ArrowSchema *out);
 int ExampleBlendedProcess(void *data, struct VgiFunctionCall *call, const struct VgiBatch *input,
                           struct VgiBatch *out, struct ArrowBuffer *metadata, int *finished);
+/* Append a parent_row index; set the rows as vgi_rpc.parent_row#b64 metadata. */
+int ExampleParentRow(struct ArrowBuffer *rows, int64_t row);
+int ExampleParentsMetadata(struct ArrowBuffer *metadata, const struct ArrowBuffer *rows);
+int ExamplePagedSupported(const char *);
+int ExamplePagedBind(void *, struct VgiFunctionCall *, struct ArrowSchema *);
+int ExamplePagedInit(void *, struct VgiFunctionCall *);
+void ExamplePagedFree(void *, struct VgiFunctionCall *);
+int ExamplePagedProcess(void *, struct VgiFunctionCall *, const struct VgiBatch *,
+                        struct VgiBatch *, struct ArrowBuffer *, int *);
+int ExamplePagedResume(void *, struct VgiFunctionCall *, struct VgiBatch *, struct ArrowBuffer *);
 int ExampleTablePlan(void *data, struct VgiFunctionCall *call, const char *method,
                      struct VgiBatch *result);
 int ExampleContextSupported(const char *name);
