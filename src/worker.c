@@ -13,9 +13,9 @@
 #include "catalog_internal.h"
 #include "filter_internal.h"
 #include "memory_catalog_internal.h"
+#include "opaque_internal.h"
 #include "split_internal.h"
 #include "tickets_internal.h"
-#include "opaque_internal.h"
 #include "vgi/catalog.h"
 #include "vgi/copy.h"
 #include "vgi/http.h"
@@ -109,20 +109,30 @@ int VgiFunctionInit(struct VgiFunction *function, const char *name, enum VgiFunc
                                                : "TABLE";
     if (!rc) rc = VgiBatchSetString(&function->info, "function_type", type);
     if (!rc) rc = VgiIpcWriteSchema(arguments, &bytes, error);
-    /* Wire 2.2 dictionary-encodes FunctionInfo's schemas; this appends either form. */
-    if (!rc)
-        rc = VgiArrayAppendString(
-            VgiBatchColumn(&function->info, "arguments"),
-            (struct ArrowStringView){(const char *)bytes.data, bytes.size_bytes});
+    if (!rc) rc = VgiFunctionSetBytes(function, "arguments", bytes.data, bytes.size_bytes);
     ArrowBufferReset(&bytes);
     if (!rc) rc = VgiIpcWriteSchema(output, &bytes, error);
-    if (!rc)
-        rc = VgiArrayAppendString(
-            VgiBatchColumn(&function->info, "output_schema"),
-            (struct ArrowStringView){(const char *)bytes.data, bytes.size_bytes});
+    if (!rc) rc = VgiFunctionSetBytes(function, "output_schema", bytes.data, bytes.size_bytes);
     ArrowBufferReset(&bytes);
     if (rc) VgiFunctionReset(function);
     return rc;
+}
+/* Wire 2.2 dictionary-encodes FunctionInfo's binary fields (arguments,
+ * output_schema, parameter_default_values); append either form. */
+int VgiFunctionSetBytes(struct VgiFunction *function, const char *name, const void *data,
+                        int64_t size) {
+    if (!function || !function->info.array.release || !name || size < 0 || (!data && size))
+        return EINVAL;
+    struct ArrowArray *col = VgiBatchColumn(&function->info, name);
+    if (!col) return ENOENT;
+    if (!data) return ArrowArrayAppendNull(col, 1);
+    struct ArrowBufferView value = {{data}, size};
+    if (col->dictionary) {
+        int64_t index = col->dictionary->length;
+        NANOARROW_RETURN_NOT_OK(ArrowArrayAppendBytes(col->dictionary, value));
+        return ArrowArrayAppendInt(col, index);
+    }
+    return ArrowArrayAppendBytes(col, value);
 }
 void VgiFunctionReset(struct VgiFunction *function) {
     VgiBatchReset(&function->info);
@@ -147,7 +157,8 @@ struct VgiWorker *VgiWorkerNew(const char *catalog) {
                                       VGI_METHODS,
                                       VGI_METHOD_COUNT,
                                       worker_dispatch,
-                                      worker, NULL};
+                                      worker,
+                                      NULL};
     if (VgiRpcServerAddProtocol(worker->rpc, &protocol, NULL)) {
         VgiWorkerFree(worker);
         return NULL;
@@ -231,6 +242,53 @@ static int check_registration(const struct VgiFunction *function, struct ArrowEr
     }
     return 0;
 }
+/* The extension decides whether a function runs on one shared connection from
+ * the FunctionInfo the catalog serves, so a declarative catalog entry that says
+ * max_workers = 1 is refused for a resumable function as the registered
+ * FunctionInfo is, whichever of the two is added first. */
+static int refuse_shared_entry(const struct VgiFunction *function, const char *catalog,
+                               const char *schema, const struct VgiBatch *entry,
+                               struct ArrowError *error) {
+    struct ArrowStringView name = VgiBatchString(&function->info, "name"),
+                           served = VgiBatchString(entry, "name");
+    if (!function->resume || !name.data || !served.data || name.size_bytes != served.size_bytes ||
+        memcmp(name.data, served.data, (size_t)name.size_bytes) ||
+        strcmp(catalog, function->catalog) || strcmp(schema, function->schema_path) ||
+        VgiBatchIsNull(entry, "max_workers") || VgiBatchInt(entry, "max_workers", 0) != 1)
+        return 0;
+    ArrowErrorSet(error,
+                  "%.*s: resume (continued output) is not supported with max_workers = 1, which "
+                  "catalog %s advertises for %s.%.*s; the client runs such a function on one "
+                  "shared connection",
+                  (int)name.size_bytes, name.data, catalog, schema, (int)name.size_bytes,
+                  name.data);
+    return EINVAL;
+}
+struct EntryCheck {
+    const struct VgiFunction *function;
+    struct VgiWorker *worker;
+    const char *catalog;
+};
+static int check_entry_against_function(void *state, const char *catalog, const char *schema,
+                                        const struct VgiBatch *entry, struct ArrowError *error) {
+    struct EntryCheck *check = state;
+    return refuse_shared_entry(check->function, catalog, schema, entry, error);
+}
+static int check_entry_against_worker(void *state, const char *schema, const struct VgiBatch *entry,
+                                      struct ArrowError *error) {
+    struct EntryCheck *check = state;
+    int rc = 0;
+    for (size_t i = 0; !rc && i < check->worker->function_count; ++i)
+        rc = refuse_shared_entry(&check->worker->functions[i].function, check->catalog, schema,
+                                 entry, error);
+    return rc;
+}
+static int check_catalog_contents(struct VgiWorker *worker, const char *catalog,
+                                  const struct VgiBatch *contents, struct ArrowError *error) {
+    if (!worker || !catalog || !contents) return 0;
+    struct EntryCheck check = {NULL, worker, catalog};
+    return VgiCatalogContentsFunctions(contents, check_entry_against_worker, &check, error);
+}
 int VgiWorkerRegisterFunction(struct VgiWorker *worker, struct VgiFunction *function,
                               struct ArrowError *error) {
     if (!worker || !function || !function->info.array.release) return EINVAL;
@@ -246,6 +304,14 @@ int VgiWorkerRegisterFunction(struct VgiWorker *worker, struct VgiFunction *func
     if (!rc && !schema_path->length) rc = append_path(schema_path, path);
     if (!rc && !function->info.array.length) rc = VgiBatchFinishRow(&function->info, error);
     if (!rc) rc = check_registration(function, error);
+    if (!rc && function->resume) {
+        struct VgiFunction placed = *function;
+        placed.catalog = catalog;
+        placed.schema_path = path;
+        struct EntryCheck check = {&placed, worker, NULL};
+        rc = VgiCatalogFunctions(worker->catalog_service, check_entry_against_function, &check,
+                                 error);
+    }
     if (rc) return rc;
     struct RegisteredFunction owned = {0};
     owned.catalog = text_copy(catalog);
@@ -471,12 +537,20 @@ int VgiWorkerSetCatalogVersions(struct VgiWorker *worker, const char *name,
 int VgiWorkerAddCatalogSnapshot(struct VgiWorker *worker, const char *name, const char *version,
                                 const struct VgiBatch *contents, const struct VgiBatch *extras,
                                 struct ArrowError *error) {
-    return VgiCatalogAddSnapshot(worker->catalog_service, name, version, contents, extras, error);
+    int rc = check_catalog_contents(worker, name, contents, error);
+    return rc ? rc
+              : VgiCatalogAddSnapshot(worker->catalog_service, name, version, contents, extras,
+                                      error);
 }
 int VgiWorkerRegisterCatalog(struct VgiWorker *worker, const struct VgiBatch *info,
                              const struct VgiBatch *attach, const struct VgiBatch *contents,
                              const struct VgiBatch *extras, struct ArrowError *error) {
-    return VgiCatalogAdd(&worker->catalog_service, info, attach, contents, extras, error);
+    if (!worker || !info) return EINVAL;
+    struct ArrowStringView catalog = VgiBatchString(info, "name");
+    char *name = catalog.data ? text_view(catalog) : NULL;
+    int rc = name ? check_catalog_contents(worker, name, contents, error) : 0;
+    free(name);
+    return rc ? rc : VgiCatalogAdd(&worker->catalog_service, info, attach, contents, extras, error);
 }
 int VgiWorkerRegisterCopyFormat(struct VgiWorker *worker, const struct VgiBatch *info,
                                 struct ArrowError *error) {
@@ -890,8 +964,10 @@ static int function_next(void *state, struct VgiRpcCall *rpc, const struct VgiBa
         rc = refuse(rpc, name, "set more output but has no resume callback");
     else if (more && *finished)
         rc = refuse(rpc, name, "set more output on a finished stream");
-    else if (!rc && (more || tick) && !output->array.release)
-        rc = refuse(rpc, name, "every reply of continued output must carry a batch");
+    else if (!rc && fn->kind == VGI_TABLE_IN_OUT && !*finished && !output->array.release)
+        /* One reply per turn, as vgi-rpc's exchange requires ("No data batch was
+         * emitted"): every input, and every tick, is answered with a batch. */
+        rc = refuse(rpc, name, "every table-in-out reply must carry a batch");
     else if (!rc && tick && has_cache_control(output_metadata))
         rc = refuse(rpc, name,
                     "cache control may only ride an input's first reply, not a continuation");

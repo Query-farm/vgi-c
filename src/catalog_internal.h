@@ -34,4 +34,15 @@ int VgiCatalogCollectionsSet(struct VgiBatch *result,
 /* vgi-python's content-hash ETag over the six collections, as lowercase hex. */
 void VgiCatalogCollectionsDigest(const struct ArrowBuffer collections[VGI_CATALOG_COLLECTIONS],
                                  char hex[65]);
+/* Visit each FunctionInfo a declarative contents batch serves, with its schema
+ * path joined by dots ("main" for the root). A nonzero return stops the walk. */
+typedef int (*VgiCatalogFunctionVisitor)(void *state, const char *schema,
+                                         const struct VgiBatch *function, struct ArrowError *);
+int VgiCatalogContentsFunctions(const struct VgiBatch *contents, VgiCatalogFunctionVisitor,
+                                void *state, struct ArrowError *);
+/* The same over every catalog a service holds: base contents and snapshots. */
+typedef int (*VgiCatalogEntryVisitor)(void *state, const char *catalog, const char *schema,
+                                      const struct VgiBatch *function, struct ArrowError *);
+int VgiCatalogFunctions(struct VgiCatalogService *, VgiCatalogEntryVisitor, void *state,
+                        struct ArrowError *);
 #endif

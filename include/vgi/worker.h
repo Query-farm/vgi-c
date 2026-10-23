@@ -80,12 +80,19 @@ struct VgiFunction {
                   struct ArrowBuffer *metadata);
 };
 
-/* Function info remains a builder until registration: set any generated
- * FunctionInfo property with VgiBatchSet* before handing it to the worker. */
+/* Function info remains a builder until registration: set generated
+ * FunctionInfo properties before handing it to the worker. Set binary ones
+ * (arguments, output_schema, parameter_default_values, ...) with
+ * VgiFunctionSetBytes, which handles their dictionary encoding (wire 2.2);
+ * VgiBatchSet* sets the others (strings, integers, nulls). */
 int VgiFunctionInit(struct VgiFunction *function, const char *name, enum VgiFunctionKind kind,
                     const struct ArrowSchema *arguments, const struct ArrowSchema *output,
                     struct ArrowError *error);
 void VgiFunctionReset(struct VgiFunction *function);
+/* Set one binary FunctionInfo property, plain or dictionary-encoded; NULL data
+ * sets null. ENOENT if FunctionInfo has no such field. */
+int VgiFunctionSetBytes(struct VgiFunction *function, const char *name, const void *data,
+                        int64_t size);
 struct VgiWorker *VgiWorkerNew(const char *catalog);
 void VgiWorkerFree(struct VgiWorker *worker);
 /* Successful registration moves function and clears it. */

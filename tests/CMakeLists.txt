@@ -23,3 +23,6 @@ add_test(NAME credentials COMMAND vgi-credentials-test "${CMAKE_CURRENT_SOURCE_D
 add_executable(vgi-filter-test filter_test.c)
 target_link_libraries(vgi-filter-test PRIVATE vgi::vgi)
 add_test(NAME filter COMMAND vgi-filter-test)
+add_executable(vgi-registration-test registration_test.c)
+target_link_libraries(vgi-registration-test PRIVATE vgi::vgi)
+add_test(NAME registration COMMAND vgi-registration-test)
