@@ -17,8 +17,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 import pyarrow as pa
 from check_rpc import encode, invoke, payload, request
-from vgi.protocol import CatalogAttachRequest
+from vgi.protocol import CatalogAttachRequest, VgiProtocol
 from vgi_rpc.rpc._reflection import Reflection
+
+# Implementation-specific reference functions outside the portable fixture
+# surface (the shared suite's function_registration.test excludes them).
+SDK_SPECIFIC = {"projection_sequence"}
 
 
 def main():
@@ -35,7 +39,7 @@ def main():
             invoke(binary, request(method, values, **kwargs))[0]
         ).to_pylist()[0]
 
-    description = rpc("describe", {"protocol": "vgi.v2"}, protocol=Reflection)
+    description = rpc("describe", {"protocol": VgiProtocol.protocol_name}, protocol=Reflection)
     version = description["protocol_version"]
     rows = []
     schema = None
@@ -89,6 +93,7 @@ def main():
                     rows.extend(
                         dict(row, fixture_catalog=catalog_name)
                         for row in table.to_pylist()
+                        if row["name"] not in SDK_SPECIFIC
                     )
     rows.sort(
         key=lambda row: (

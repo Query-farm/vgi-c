@@ -131,7 +131,7 @@ def main() -> None:
     manifest_path = fixtures_path.with_suffix(".json")
     manifest = json.loads(manifest_path.read_text())
     description = payload(
-        invoke(args.worker, request("describe", {"protocol": "vgi.v2"}, protocol=Reflection))[0]
+        invoke(args.worker, request("describe", {"protocol": VgiProtocol.protocol_name}, protocol=Reflection))[0]
     ).to_pylist()[0]
     manifest.update(
         protocol_version=VgiProtocol.protocol_version,

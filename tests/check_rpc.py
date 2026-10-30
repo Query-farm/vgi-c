@@ -72,7 +72,7 @@ def main():
     args = parser.parse_args()
     requests = [
         request("list_protocols", protocol=Reflection),
-        request("describe", {"protocol": "vgi.v2"}, protocol=Reflection),
+        request("describe", {"protocol": VgiProtocol.protocol_name}, protocol=Reflection),
         request("catalog_catalogs", version="99.0.0"),
         request("missing", schema=pa.schema([])),
         request(

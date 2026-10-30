@@ -809,6 +809,8 @@ static int bind_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     if (!rc) rc = VgiIpcWriteSchema(&context.output_schema, &bytes, &call->error);
     if (!rc) rc = VgiBatchSetBytes(&payload, "output_schema", bytes.data, bytes.size_bytes);
     if (!rc) rc = VgiBatchSetBytes(&payload, "opaque_data", "", 0);
+    /* vgi.v3: no structured projection profiles; repeatability is not promised. */
+    if (!rc) rc = VgiBatchSetString(&payload, "repeatability", "UNKNOWN");
     if (!rc && !VgiBatchInt(&context.bind_request, "resolved_secrets_provided", 0)) {
         struct VgiFunction *fn = &registered->function;
         if (fn->secret_lookups)
@@ -1774,6 +1776,12 @@ int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowEr
                 grant_ttl = argv[i];
             continue;
         }
+        /* Reference serve-CLI flags: reflection is always served, diagnostics
+         * always go to standard error, and socket servers already serve
+         * connections concurrently, so these change nothing here. */
+        if (!strcmp(argv[i], "--describe") || !strcmp(argv[i], "--quiet") ||
+            !strcmp(argv[i], "--debug") || !strcmp(argv[i], "--threaded"))
+            continue;
         if (!strcmp(argv[i], "--version")) {
             puts("vgi-c 0.1.0");
             return 0;

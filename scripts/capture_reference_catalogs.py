@@ -10,10 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "scripts"))
 import pyarrow as pa
 from check_rpc import encode, invoke, payload, request
-from vgi.codegen.c_schemas import schemas
-from vgi.protocol import CatalogAttachRequest
+from vgi.protocol import CatalogAttachRequest, SchemaContents
+from capture_reference_catalog import SDK_SPECIFIC
 
 
 def main():
@@ -77,8 +78,16 @@ def main():
     def one(table):
         return table.to_pylist()[0]
 
-    contents_schema = next(
-        s.schema for s in schemas() if s.name == "CatalogContentsResult"
+    # Declarative contents keep the per-schema layout; the worker regroups them
+    # into catalog_contents' catalog-wide collections when it answers.
+    schema_contents = SchemaContents.ARROW_SCHEMA
+    contents_schema = pa.schema(
+        [
+            pa.field("catalog_version", pa.int64(), nullable=False),
+            pa.field("etag", pa.string()),
+            pa.field("not_modified", pa.bool_(), nullable=False),
+            pa.field("schemas", pa.list_(pa.struct(list(schema_contents))), nullable=False),
+        ]
     )
     rows = []
     catalogs = one(rpc("catalog_catalogs"))["items"]
@@ -136,6 +145,12 @@ def main():
                     },
                 )
             )["items"]
+            for kind in ("scalar_functions", "aggregate_functions", "table_functions"):
+                entry[kind] = [
+                    item
+                    for item in entry[kind]
+                    if one(pa.ipc.open_stream(item).read_all())["name"] not in SDK_SPECIFIC
+                ]
             for table in entry["tables"]:
                 table_name = one(pa.ipc.open_stream(table).read_all())["name"]
                 values = {
