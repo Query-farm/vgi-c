@@ -260,6 +260,74 @@ static int conflict(struct VgiRpcCall *call, const struct VgiBatch *params, int 
     if (*replace || is(action, "IGNORE") || is(action, "ignore")) return 0;
     return failure(call, "An object with this name already exists");
 }
+/* COMMENT ON VIEW and COMMENT ON COLUMN of a view: rebuild its ViewInfo with
+ * the comment, or one column_comments entry, replaced (null removes it). */
+static int view_comment(struct Snapshot *s, size_t si, const struct VgiBatch *p,
+                        struct VgiRpcCall *call, int *changed) {
+    int column = !strcmp(call->method->name, "catalog_view_column_comment_set");
+    struct ArrowStringView target = {0};
+    if (column) {
+        const struct ArrowArrayView *path = VgiBatchGet(p, "column_path");
+        if (!path || ArrowArrayViewIsNull(path, 0) ||
+            ArrowArrayViewListChildOffset(path, 1) - ArrowArrayViewListChildOffset(path, 0) != 1)
+            return failure(call, "view column comments require one raw output identifier");
+        target = VgiValueString(path->children[0], ArrowArrayViewListChildOffset(path, 0));
+        if (!target.data || !target.size_bytes || memchr(target.data, 0, (size_t)target.size_bytes))
+            return failure(call, "view column comments require one raw output identifier");
+    }
+    struct Objects *views = si < s->count ? &s->schemas[si].views : NULL;
+    size_t oi = 0;
+    for (; views && oi < views->count; ++oi)
+        if (!text_compare(VgiBatchString(p, "name"), VgiBatchString(&views->items[oi], "name"), 1))
+            break;
+    if (!views || oi == views->count)
+        return VgiBatchInt(p, "ignore_not_found", 0) ? 0 : failure(call, "View does not exist");
+    struct VgiBatch *old = &views->items[oi], updated = {0};
+    struct ArrowStringView comment = VgiBatchString(p, "comment");
+    int rc = VgiBatchInitNamed(&updated, "ViewInfo", &call->error);
+    for (int64_t i = 0; !rc && i < updated.schema.n_children; ++i) {
+        const char *field = updated.schema.children[i]->name;
+        struct ArrowArray *out = updated.array.children[i];
+        int64_t source = VgiFieldIndex(&old->schema, field);
+        if (!column && !strcmp(field, "comment")) {
+            rc = comment.data ? ArrowArrayAppendString(out, comment) : ArrowArrayAppendNull(out, 1);
+        } else if (column && !strcmp(field, "column_comments")) {
+            /* Keep every other entry, then the new one unless it is cleared. */
+            const struct ArrowArrayView *map = source < 0 ? NULL : old->view.children[source];
+            struct ArrowArray *entries = out->children[0];
+            int64_t start = map ? ArrowArrayViewListChildOffset(map, 0) : 0,
+                    end = map ? ArrowArrayViewListChildOffset(map, 1) : 0;
+            for (int64_t j = start; !rc && j < end; ++j) {
+                struct ArrowStringView key = VgiValueString(map->children[0]->children[0], j),
+                                       value = VgiValueString(map->children[0]->children[1], j);
+                if (!text_compare(key, target, 0)) continue;
+                rc = ArrowArrayAppendString(entries->children[0], key);
+                if (!rc)
+                    rc = value.data ? ArrowArrayAppendString(entries->children[1], value)
+                                    : ArrowArrayAppendNull(entries->children[1], 1);
+                if (!rc) rc = ArrowArrayFinishElement(entries);
+            }
+            if (!rc && comment.data) {
+                rc = ArrowArrayAppendString(entries->children[0], target);
+                if (!rc) rc = ArrowArrayAppendString(entries->children[1], comment);
+                if (!rc) rc = ArrowArrayFinishElement(entries);
+            }
+            if (!rc) rc = ArrowArrayFinishElement(out);
+        } else if (source >= 0) {
+            rc = VgiArrayAppendValue(out, updated.schema.children[i], old->view.children[source],
+                                     old->schema.children[source], 0, &call->error);
+        }
+    }
+    if (!rc) rc = VgiBatchFinishRow(&updated, &call->error);
+    if (!rc) {
+        VgiBatchReset(old);
+        *old = updated;
+        *changed = 1;
+    } else {
+        VgiBatchReset(&updated);
+    }
+    return rc;
+}
 static int mutate(struct Snapshot *s, const char *method, const struct VgiBatch *p,
                   struct VgiRpcCall *call, int *changed) {
     *changed = 0;
@@ -304,6 +372,9 @@ static int mutate(struct Snapshot *s, const char *method, const struct VgiBatch 
         *changed = !rc;
         return rc;
     }
+    if (!strcmp(method, "catalog_view_comment_set") ||
+        !strcmp(method, "catalog_view_column_comment_set"))
+        return view_comment(s, si, p, call, changed);
     int drop_schema = !strcmp(method, "catalog_schema_drop"),
         drop = !strcmp(method, "catalog_table_drop") || !strcmp(method, "catalog_view_drop"),
         create = !strcmp(method, "catalog_table_create") || !strcmp(method, "catalog_view_create"),
@@ -358,14 +429,29 @@ static int mutate(struct Snapshot *s, const char *method, const struct VgiBatch 
         objects->items = next;
         memset(&objects->items[objects->count++], 0, sizeof(*next));
     }
+    if (view && !is(VgiBatchString(p, "security"), "regular"))
+        return failure(call, "catalog_view_create: view security mode is unsupported");
     if (!view && !VgiBatchBytes(p, "columns").size_bytes)
         return failure(call, "catalog_table_create: missing columns schema");
+    /* The store keeps metadata only, so it cannot enforce a constraint on any
+     * write path and must not claim one (vgi.v3 serves only ENFORCED records). */
+    const struct ArrowArrayView *definitions =
+        view ? NULL : VgiBatchGet(p, "constraint_definitions");
+    if (definitions && !ArrowArrayViewIsNull(definitions, 0) &&
+        ArrowArrayViewListChildOffset(definitions, 1) >
+            ArrowArrayViewListChildOffset(definitions, 0))
+        return failure(call,
+                       "catalog_table_create: a metadata catalog cannot enforce NOT NULL, PRIMARY "
+                       "KEY, UNIQUE, CHECK or FOREIGN KEY constraints; create the table without "
+                       "them");
     struct VgiBatch *object = &objects->items[oi];
     VgiBatchReset(object);
     int rc = VgiBatchInitNamed(object, view ? "ViewInfo" : "TableInfo", &call->error);
     for (int64_t i = 0; !rc && i < object->schema.n_children; ++i) {
         const char *field = object->schema.children[i]->name;
-        if (VgiBatchGet(p, field)) rc = copy_field(object, field, p, field, &call->error);
+        /* Omitted or null request fields take the record's default. */
+        if (VgiBatchGet(p, field) && !VgiBatchIsNull(p, field))
+            rc = copy_field(object, field, p, field, &call->error);
     }
     if (!rc) rc = VgiBatchFinishRow(object, &call->error);
     *changed = !rc;

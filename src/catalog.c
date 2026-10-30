@@ -9,16 +9,20 @@
 #include <string.h>
 
 #include "catalog_internal.h"
+#include "constraints_internal.h"
 #include "tickets_internal.h"
 #include "vgi/generated/protocol.h"
 #include "vgi/storage.h"
 struct Snapshot {
     char *version;
     struct VgiBatch contents, extras;
+    int records;
 };
 struct Catalog {
     char *name;
     struct VgiBatch info, attach, contents, extras;
+    /* Some served table carries canonical constraint records. */
+    int records;
     struct json_object *versions;
     struct Snapshot *snapshots;
     size_t snapshot_count;
@@ -81,6 +85,67 @@ void VgiCatalogFree(struct VgiCatalogService *s) {
         free(s);
     }
 }
+/* The declarative tables of one snapshot: per-schema contents lists plus the
+ * catalog_table_get descriptors in extras. Each is held to the extension's
+ * ATTACH contract now, so a catalog it would refuse fails at registration. */
+static int check_tables(const char *catalog, const struct VgiBatch *contents,
+                        const struct VgiBatch *extras, int *records, struct ArrowError *error) {
+    *records = 0;
+    struct ArrowBufferView *tables = NULL;
+    size_t count = 0;
+    int rc = 0;
+    int64_t field = VgiFieldIndex(&contents->schema, "schemas");
+    const struct ArrowArrayView *list = field < 0 ? NULL : contents->view.children[field];
+    int64_t id = list ? VgiFieldIndex(contents->schema.children[field]->children[0], "tables") : -1;
+    if (id >= 0) {
+        const struct ArrowArrayView *items = list->children[0]->children[id];
+        int64_t first =
+                    ArrowArrayViewListChildOffset(items, ArrowArrayViewListChildOffset(list, 0)),
+                last = ArrowArrayViewListChildOffset(items, ArrowArrayViewListChildOffset(list, 1));
+        tables = calloc((size_t)(last - first) + 1, sizeof(*tables));
+        if (!tables) return ENOMEM;
+        for (int64_t j = first; !rc && j < last; ++j) {
+            struct ArrowStringView bytes = VgiValueString(items->children[0], j);
+            struct ArrowBuffer served;
+            ArrowBufferInit(&served);
+            int has = 0;
+            tables[count++] = (struct ArrowBufferView){{bytes.data}, bytes.size_bytes};
+            rc = VgiTableInfoServe(tables[count - 1], &served, &has, NULL, error);
+            *records |= has;
+            ArrowBufferReset(&served);
+        }
+    }
+    if (!rc) rc = VgiTableInfoCheckForeignKeys(tables, count, error);
+    free(tables);
+    int64_t mi = extras ? VgiFieldIndex(&extras->schema, "method") : -1,
+            vi = extras ? VgiFieldIndex(&extras->schema, "value") : -1;
+    for (int64_t row = 0; !rc && mi >= 0 && vi >= 0 && row < extras->array.length; ++row) {
+        if (!text_is(VgiValueString(extras->view.children[mi], row), "catalog_table_get")) continue;
+        struct ArrowStringView value = VgiValueString(extras->view.children[vi], row);
+        struct VgiBatch result = {0};
+        rc = VgiBatchDecode(&result, (struct ArrowBufferView){{value.data}, value.size_bytes},
+                            error);
+        const struct ArrowArrayView *items = rc ? NULL : VgiBatchGet(&result, "items");
+        for (int64_t j = items ? ArrowArrayViewListChildOffset(items, 0) : 0;
+             !rc && items && j < ArrowArrayViewListChildOffset(items, 1); ++j) {
+            struct ArrowStringView bytes = VgiValueString(items->children[0], j);
+            struct ArrowBuffer served;
+            ArrowBufferInit(&served);
+            int has = 0;
+            rc = VgiTableInfoServe((struct ArrowBufferView){{bytes.data}, bytes.size_bytes},
+                                   &served, &has, NULL, error);
+            *records |= has;
+            ArrowBufferReset(&served);
+        }
+        VgiBatchReset(&result);
+    }
+    if (rc && rc != ENOMEM && error) {
+        char detail[sizeof(error->message)];
+        snprintf(detail, sizeof(detail), "%s", error->message);
+        ArrowErrorSet(error, "catalog '%s': %s", catalog, detail);
+    }
+    return rc;
+}
 int VgiCatalogAdd(struct VgiCatalogService **service, const struct VgiBatch *info,
                   const struct VgiBatch *attach, const struct VgiBatch *contents,
                   const struct VgiBatch *extras, struct ArrowError *error) {
@@ -106,6 +171,7 @@ int VgiCatalogAdd(struct VgiCatalogService **service, const struct VgiBatch *inf
     if (!rc) rc = copy_batch(attach, &c.attach, error);
     if (!rc) rc = copy_batch(contents, &c.contents, error);
     if (!rc && extras) rc = copy_batch(extras, &c.extras, error);
+    if (!rc) rc = check_tables(c.name, &c.contents, extras ? &c.extras : NULL, &c.records, error);
     if (!rc) {
         struct Catalog *next = realloc(s->catalogs, (s->count + 1) * sizeof(*next));
         if (!next)
@@ -173,6 +239,9 @@ int VgiCatalogAddSnapshot(struct VgiCatalogService *s, const char *name, const c
     snapshot.version = copy_text(ArrowCharView(version));
     int rc = snapshot.version ? copy_batch(contents, &snapshot.contents, error) : ENOMEM;
     if (!rc && extras) rc = copy_batch(extras, &snapshot.extras, error);
+    if (!rc)
+        rc = check_tables(c->name, &snapshot.contents, extras ? &snapshot.extras : NULL,
+                          &snapshot.records, error);
     if (!rc) {
         struct Snapshot *next = realloc(c->snapshots, (c->snapshot_count + 1) * sizeof(*next));
         if (!next)
@@ -257,6 +326,7 @@ static struct Catalog select_snapshot(struct Catalog *source, const char *versio
         if (!strcmp(source->snapshots[i].version, version)) {
             selected.contents = source->snapshots[i].contents;
             selected.extras = source->snapshots[i].extras;
+            selected.records = source->snapshots[i].records;
             break;
         }
     return selected;
@@ -316,6 +386,40 @@ static int append_encoded(struct ArrowArray *list, const struct VgiBatch *batch,
     ArrowBufferReset(&bytes);
     return rc;
 }
+/* Serve one TableInfo: checked against the ATTACH contract, nullability
+ * rewritten to match its NOT_NULL / PRIMARY_KEY records. */
+static int append_served(struct ArrowArray *list, struct ArrowStringView bytes,
+                         struct ArrowError *error) {
+    struct ArrowBuffer served;
+    ArrowBufferInit(&served);
+    int rc = VgiTableInfoServe((struct ArrowBufferView){{bytes.data}, bytes.size_bytes}, &served,
+                               NULL, NULL, error);
+    if (!rc)
+        rc = ArrowArrayAppendBytes(list->children[0],
+                                   (struct ArrowBufferView){{served.data}, served.size_bytes});
+    ArrowBufferReset(&served);
+    return rc;
+}
+/* A captured catalog_table_get result with its tables served. */
+static int served_table_result(struct ArrowStringView value, struct ArrowBuffer *out,
+                               struct ArrowError *error) {
+    struct VgiBatch source = {0}, target = {0};
+    int rc =
+        VgiBatchDecode(&source, (struct ArrowBufferView){{value.data}, value.size_bytes}, error);
+    if (!rc) rc = VgiBatchInitNamed(&target, "CatalogTableGetResult", error);
+    const struct ArrowArrayView *items = rc ? NULL : VgiBatchGet(&source, "items");
+    struct ArrowArray *list = rc ? NULL : VgiBatchColumn(&target, "items");
+    if (!rc && (!items || !list)) rc = EINVAL;
+    for (int64_t j = rc ? 0 : ArrowArrayViewListChildOffset(items, 0);
+         !rc && j < ArrowArrayViewListChildOffset(items, 1); ++j)
+        rc = append_served(list, VgiValueString(items->children[0], j), error);
+    if (!rc) rc = ArrowArrayFinishElement(list);
+    if (!rc) rc = VgiBatchFinishRow(&target, error);
+    if (!rc) rc = encode(&target, out, error);
+    VgiBatchReset(&source);
+    VgiBatchReset(&target);
+    return rc;
+}
 /* Captured descriptors may predate the current record layout, so re-encode one as
  * the generated record (wire 2.2 dictionary-encodes FunctionInfo's schemas and
  * drops SchemaInfo's attach cookie). Fields are matched by name. */
@@ -336,10 +440,22 @@ static int append_record(struct ArrowArray *list, const char *record, struct Arr
 }
 static int clone_with_cookie(const struct VgiBatch *source, struct ArrowStringView cookie,
                              const char *data_version, const char *impl_version,
-                             struct VgiBatch *out, struct ArrowError *error) {
+                             const struct ArrowBuffer *available,
+                             const struct ArrowBuffer *selected, struct VgiBatch *out,
+                             struct ArrowError *error) {
     int rc = VgiBatchInit(out, &source->schema, error);
     for (int64_t i = 0; !rc && i < source->schema.n_children; ++i) {
-        if (!strcmp(source->schema.children[i]->name, "attach_opaque_data"))
+        const char *field = source->schema.children[i]->name;
+        const struct ArrowBuffer *negotiated = !strcmp(field, "catalog_capabilities")    ? available
+                                               : !strcmp(field, "selected_capabilities") ? selected
+                                                                                         : NULL;
+        if (negotiated)
+            rc = negotiated->size_bytes
+                     ? ArrowArrayAppendBytes(
+                           out->array.children[i],
+                           (struct ArrowBufferView){{negotiated->data}, negotiated->size_bytes})
+                     : ArrowArrayAppendNull(out->array.children[i], 1);
+        else if (!strcmp(field, "attach_opaque_data"))
             rc = ArrowArrayAppendBytes(out->array.children[i],
                                        (struct ArrowBufferView){{cookie.data}, cookie.size_bytes});
         else if (data_version && !strcmp(source->schema.children[i]->name, "resolved_data_version"))
@@ -454,7 +570,16 @@ static int extra_reply(struct Catalog *catalog, struct VgiRpcCall *call, struct 
     int64_t row = selected >= 0 ? selected : fallback;
     if (row >= 0) {
         *found = 1;
-        return reply_raw(call, reply, VgiValueString(e->view.children[vi], row));
+        if (!table) return reply_raw(call, reply, VgiValueString(e->view.children[vi], row));
+        struct ArrowBuffer served;
+        ArrowBufferInit(&served);
+        int rc =
+            served_table_result(VgiValueString(e->view.children[vi], row), &served, &call->error);
+        if (!rc)
+            rc = reply_raw(call, reply,
+                           (struct ArrowStringView){(const char *)served.data, served.size_bytes});
+        ArrowBufferReset(&served);
+        return rc;
     }
     if (stats) {
         *found = 1;
@@ -516,6 +641,16 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
             rc = resolve_version(catalog, &request, 0, &data_version, &call->error);
             if (!rc) rc = resolve_version(catalog, &request, 1, &impl_version, &call->error);
             if (!rc) rc = VgiCatalogMergeOptions(&catalog->info, &request, &options, &call->error);
+            /* Offer constraint read profiles when a served table carries records,
+             * and select what the client's catalog offer accepts. */
+            struct ArrowBuffer available, chosen;
+            ArrowBufferInit(&available);
+            ArrowBufferInit(&chosen);
+            if (!rc)
+                rc = VgiCatalogNegotiate(catalog->records,
+                                         VgiBatchBytes(&catalog->attach, "catalog_capabilities"),
+                                         VgiBatchBytes(&request, "client_capabilities"), &available,
+                                         &chosen, &call->error);
             unsigned char id[16];
             char hex[33];
             randombytes_buf(id, sizeof(id));
@@ -532,8 +667,10 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                 ArrowCharView(json_object_to_json_string_ext(cookie, JSON_C_TO_STRING_PLAIN));
             if (!rc) rc = VgiCatalogStoreOptions(value, &options, &call->error);
             if (!rc)
-                rc = clone_with_cookie(&catalog->attach, value, data_version, impl_version, &result,
-                                       &call->error);
+                rc = clone_with_cookie(&catalog->attach, value, data_version, impl_version,
+                                       &available, &chosen, &result, &call->error);
+            ArrowBufferReset(&available);
+            ArrowBufferReset(&chosen);
             VgiBatchReset(&options);
             json_object_put(cookie);
         } else if (!strcmp(method, "catalog_detach")) {
@@ -661,6 +798,9 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                         if (!rc && strstr(kind, "functions"))
                             rc = append_record(VgiBatchColumn(&result, "items"), "FunctionInfo",
                                                data, &call->error);
+                        else if (!rc && !strcmp(kind, "tables"))
+                            rc =
+                                append_served(VgiBatchColumn(&result, "items"), data, &call->error);
                         else if (!rc)
                             rc = ArrowArrayAppendBytes(
                                 VgiBatchColumn(&result, "items")->children[0],
@@ -799,9 +939,21 @@ int VgiCatalogCollections(const struct VgiBatch *contents,
                 if (id < 0) continue;
                 const struct ArrowArrayView *items = entries->children[id];
                 for (int64_t j = ArrowArrayViewListChildOffset(items, row);
-                     !rc && j < ArrowArrayViewListChildOffset(items, row + 1); ++j)
-                    rc = append_row(&records[collection_sources[s].collection],
-                                    VgiValueString(items->children[0], j), error);
+                     !rc && j < ArrowArrayViewListChildOffset(items, row + 1); ++j) {
+                    struct ArrowStringView bytes = VgiValueString(items->children[0], j);
+                    struct ArrowBuffer served;
+                    ArrowBufferInit(&served);
+                    if (collection_sources[s].collection == 1) {
+                        rc = VgiTableInfoServe(
+                            (struct ArrowBufferView){{bytes.data}, bytes.size_bytes}, &served, NULL,
+                            NULL, error);
+                        bytes =
+                            (struct ArrowStringView){(const char *)served.data, served.size_bytes};
+                    }
+                    if (!rc)
+                        rc = append_row(&records[collection_sources[s].collection], bytes, error);
+                    ArrowBufferReset(&served);
+                }
             }
         }
     }

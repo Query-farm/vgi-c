@@ -42,7 +42,7 @@ pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
 pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
 add_library(vgi src/batch_named.c src/worker.c src/opaque.c src/arguments.c src/storage.c src/filter.c src/catalog.c src/memory_catalog.c src/statistics.c src/context.c src/copy.c src/cache.c src/partition.c src/split.c src/generated/protocol.c)
 add_library(vgi::vgi ALIAS vgi)
-target_sources(vgi PRIVATE src/attach_options.c src/credentials.c src/tickets.c)
+target_sources(vgi PRIVATE src/attach_options.c src/credentials.c src/tickets.c src/constraints.c)
 target_include_directories(vgi PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
