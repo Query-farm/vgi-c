@@ -1,0 +1,120 @@
+# Build vgi-c against vgi-rpc-c, run the native tests, and run the canonical
+# Query-farm/vgi integration sqllogictest suite against the C example worker
+# with the native runner built at the pinned VGI commit, so the SDK cannot
+# silently fall behind the extension's protocol. See ci/run-integration.sh.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Test sources and the statically linked native runner come from this exact
+  # VGI commit (protocol vgi.v3 / 3.0.0).
+  VGI_REF: 39ff88d7feb18e444d1a02d2e563c8eea577dfba
+  VGI_NATIVE_RUNNER_BRANCH: v2.0
+  # The vgi-rpc-c revision this SDK builds against.
+  VGI_RPC_C_REF: main
+
+jobs:
+  build:
+    name: Build and native tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out vgi-rpc-c
+        uses: actions/checkout@v4
+        with:
+          repository: Query-farm/vgi-rpc-c
+          ref: ${{ env.VGI_RPC_C_REF }}
+          path: vgi-rpc-c
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libjson-c-dev libsodium-dev libsqlite3-dev \
+            libevent-dev libcurl4-openssl-dev libzstd-dev liblz4-dev zlib1g-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DVGI_RPC_SOURCE_DIR="$GITHUB_WORKSPACE/vgi-rpc-c"
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Native tests
+        run: ctest --test-dir build --output-on-failure
+
+      # upload-artifact does not preserve the executable bit.
+      - name: Package worker
+        run: tar -czf vgi-c-worker.tar.gz -C build/example-worker vgi-example-worker
+
+      - name: Upload worker
+        uses: actions/upload-artifact@v4
+        with:
+          name: vgi-c-worker-${{ github.sha }}
+          path: vgi-c-worker.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  integration:
+    name: Integration (${{ matrix.transport }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        transport: [stdio, launch, http]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the pinned vgi test suite
+        uses: actions/checkout@v4
+        with:
+          repository: Query-farm/vgi
+          ref: ${{ env.VGI_REF }}
+          path: vgi-upstream
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjson-c5 libsodium23 libsqlite3-0 libevent-2.1-7t64 \
+            libevent-pthreads-2.1-7t64 libcurl4t64 libzstd1 liblz4-1 zlib1g
+
+      - name: Download worker
+        uses: actions/download-artifact@v4
+        with:
+          name: vgi-c-worker-${{ github.sha }}
+
+      - name: Extract worker
+        run: mkdir -p bin && tar -xzf vgi-c-worker.tar.gz -C bin
+
+      - name: Download native runner matching the test suite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VGI_SRC: ${{ github.workspace }}/vgi-upstream
+        run: |
+          python3 "$VGI_SRC/scripts/ci_fetch_native_runner.py" \
+            --source "$VGI_SRC" --output "$RUNNER_TEMP/vgi-native"
+
+      - name: Run integration suite (${{ matrix.transport }})
+        run: ci/run-integration.sh
+        env:
+          VGI_SRC: ${{ github.workspace }}/vgi-upstream
+          VGI_WORKER_BIN: ${{ github.workspace }}/bin/vgi-example-worker
+          TRANSPORT: ${{ matrix.transport }}

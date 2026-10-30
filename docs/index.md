@@ -62,11 +62,11 @@ script. The extension negotiates support before creating a segment. This lane
 covers mixed inline and shared-memory calls on pooled workers, buffered functions,
 COPY TO, and cached results retained across later requests.
 
-The final validation used the 371-case canonical inventory: 328 subprocess cases
-and 336 HTTP cases passed, with 43 and 35 fixture-dependent skips respectively.
-The forced shared-memory subprocess run also passed 328 cases and 12,098
-assertions, with the same 43 fixture-dependent skips.
-The separate bearer lane passed 2 cases and 13 assertions for each transport.
-Six native test groups also passed. The RPC package has independent shared
+`ci/run-integration.sh` stages the pinned suite for one transport (stdio,
+launch or http), enforces an allowlist of fixture-dependent skip reasons and an
+executed-case floor, and is what CI runs with the native runner built at the
+pinned VGI commit. The vgi.v3 validation executed 337 subprocess, 336 launcher
+and 330 HTTP cases without failures, plus the 2-case bearer lane.
+Eight native test groups also passed. The RPC package has independent shared
 server, native-client, sanitizer, and HTTPS validation documented in its
 [conformance guide](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/conformance.md).

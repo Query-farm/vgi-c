@@ -15,7 +15,7 @@ The reusable transport, IPC, reflection, identity, and native client layer is
 library and owns VGI-specific worker behavior. See [the documentation](docs/index.md)
 for the split and build options.
 
-The SDK targets the `vgi-c++` VGI 2.2.0 behavior, with schemas generated from
+The SDK targets the `vgi-c++` VGI 3.0.0 (`vgi.v3`) behavior, with schemas generated from
 `vgi-python`. It implements scalar and table functions, streaming exchanges,
 buffered functions, grouped/window/streaming aggregates, immutable and mutable
 catalogs, version negotiation and time travel, attach options, settings and
@@ -164,16 +164,18 @@ The SHM lane exercises capability negotiation, segment reuse across unary calls,
 COPY TO, buffered functions, and retained cached results. Inline catalog/bind
 calls can share the same pooled worker connection.
 
-Validated on macOS arm64 against the local reference checkouts:
+Validated on macOS arm64 for vgi.v3 with `ci/run-integration.sh` (suite at
+Query-farm/vgi `39ff88d`, `haybarn-unittest` 2.0.0rc10, community `vgi`
+extension `dc0cab9fa2`):
 
 | Check | Result |
 | --- | --- |
-| Full subprocess SQL suite | 328 passed, 43 fixture-dependent skips; 12,098 assertions |
-| Full subprocess suite, forced shared memory | 328 passed, 43 fixture-dependent skips; 12,098 assertions |
-| Full HTTP SQL suite | 336 passed, 35 fixture-dependent skips; 12,260 assertions |
-| Protected bearer lane, each run | 2 passed; 13 assertions |
-| Native C tests | 6 groups passed |
-| Schema and IPC interoperability | 201 exact schemas, 72 method signatures, 203 round trips, 9 malformed streams |
+| Subprocess SQL suite (368 staged) | 337 passed, 31 fixture-dependent skips; 13,965 assertions |
+| Launcher SQL suite (368 staged) | 336 passed, 32 fixture-dependent skips; 13,947 assertions |
+| HTTP SQL suite (365 staged) | 330 passed, 35 fixture-dependent skips; 14,335 assertions |
+| Protected bearer lane (HTTP) | 2 passed; 25 assertions |
+| Native C tests | 8 groups passed (also under `-DVGI_SANITIZE=ON`) |
+| Schema and IPC interoperability (vgi-python v0.48.2) | 258 exact schemas, 85 method signatures, 260 round trips, 9 malformed streams |
 | Installed vgi-rpc-c consumer | Separate package configured, built, and tested |
 | Shared RPC conformance, separate vgi-rpc-c suite | 1,692 shared tests passed without skips |
 | Native RPC client against Python | 1,397 passed without skips; server-only tests deselected |
@@ -204,7 +206,7 @@ For Identity conformance, use a `vgi-rpc` checkout matching the C++ baseline:
   --conformance-identity --introspect-principals conformance-introspector
 # Use the printed PORT in another terminal:
 "$HOME/Development/vgi-rpc/.venv/bin/vgi-rpc-test-hosted" \
-  --url http://127.0.0.1:PORT --expect vgi.v2,conformance.Secondary.v1 --identity
+  --url http://127.0.0.1:PORT --expect vgi.v3,conformance.Secondary.v1 --identity
 ```
 
 The conformance-header and test-bearer options are fixture-only and explicitly
@@ -237,7 +239,19 @@ schema, execution ID, per-execution storage, and current filter state.
 messages on the protocol channel; standard output is reserved for IPC.
 
 `<vgi/catalog.h>` supports immutable catalog definitions and an application
-callback for dynamic operations. `<vgi/cache.h>` renders cache advertisements;
+callback for dynamic operations. `<vgi/constraints.h>` builds the canonical
+`ConstraintInfo` records that `TableInfo.constraints` carries under `vgi.v3`
+(`VgiConstraintRecordEncode`; there is no derivation from Arrow nullability).
+Registering a declarative catalog checks every table the way the extension does
+at ATTACH: ENFORCED + ALL_ROWS records owned by the table and its one-component
+schema, unique ids and declared names, one PRIMARY KEY, resolvable column paths,
+same-schema NO ACTION / RESTRICT foreign keys whose key exists, and CHECKs that
+compare numeric columns and literals. A catalog whose tables carry records
+offers `vgi.constraint.records.read.v1` and `vgi.expression.duckdb.scalar.v1`
+and selects what the client's `ClientCapabilities.catalog` offer accepts; the
+encode/decode/select helpers are public for custom attach handlers. Served
+tables are nullable except for fields a NOT_NULL or PRIMARY KEY record names.
+The memory catalog keeps metadata only, so it refuses constrained CREATE TABLE. `<vgi/cache.h>` renders cache advertisements;
 `<vgi/partition.h>` serializes typed partition bounds. `<vgi/filter.h>` applies
 predicates, tracks dynamic revisions, and exposes diagnostics and discrete
 column values. `<vgi/storage.h>` supplies transactions, key/value state, and
