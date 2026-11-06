@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(vgi-c VERSION 0.1.0 LANGUAGES C)
+project(vgi-c VERSION 0.1.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -7,6 +7,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(VGI_BUILD_TESTS "Build C tests and interoperability tools" ON)
 option(VGI_BUILD_EXAMPLES "Build protocol inspection example" ON)
+option(VGI_BUILD_WORKER "Build the worker SDK (disable for protocol-only clients)" ON)
 option(VGI_SANITIZE "Enable address and undefined-behavior sanitizers" OFF)
 if(VGI_SANITIZE AND NOT MSVC)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -32,34 +33,47 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_compile_definitions(_DEFAULT_SOURCE)
 endif()
-find_package(PkgConfig REQUIRED)
-find_package(Threads REQUIRED)
-find_package(SQLite3 REQUIRED)
-if(NOT TARGET SQLite3::SQLite3)
-    add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
-endif()
-pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
-pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
-add_library(vgi src/batch_named.c src/worker.c src/opaque.c src/arguments.c src/storage.c src/filter.c src/catalog.c src/memory_catalog.c src/statistics.c src/context.c src/copy.c src/cache.c src/partition.c src/split.c src/generated/protocol.c)
-add_library(vgi::vgi ALIAS vgi)
-target_sources(vgi PRIVATE src/attach_options.c src/credentials.c src/tickets.c src/constraints.c)
-target_include_directories(vgi PUBLIC
+add_library(vgi_protocol src/batch_named.c src/generated/protocol.c)
+add_library(vgi::protocol ALIAS vgi_protocol)
+target_include_directories(vgi_protocol PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-target_include_directories(vgi PRIVATE src)
-target_link_libraries(vgi PUBLIC vgi_rpc::vgi_rpc)
-target_link_libraries(vgi PRIVATE PkgConfig::JSONC PkgConfig::SODIUM Threads::Threads SQLite3::SQLite3)
-if(UNIX)
-    target_link_libraries(vgi PRIVATE m)
-endif()
-set_target_properties(vgi PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-if(MSVC)
-    target_compile_options(vgi PRIVATE /W4)
-else()
-    target_compile_options(vgi PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(vgi_protocol PRIVATE src)
+target_link_libraries(vgi_protocol PUBLIC vgi_rpc::vgi_rpc)
+set_target_properties(vgi_protocol PROPERTIES
+    EXPORT_NAME protocol
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+
+if(VGI_BUILD_WORKER)
+    find_package(PkgConfig REQUIRED)
+    find_package(Threads REQUIRED)
+    find_package(SQLite3 REQUIRED)
+    if(NOT TARGET SQLite3::SQLite3)
+        add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+    endif()
+    pkg_check_modules(JSONC REQUIRED IMPORTED_TARGET json-c)
+    pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
+    add_library(vgi src/worker.c src/opaque.c src/arguments.c src/storage.c src/filter.c src/catalog.c src/memory_catalog.c src/statistics.c src/context.c src/copy.c src/cache.c src/partition.c src/split.c)
+    add_library(vgi::vgi ALIAS vgi)
+    target_sources(vgi PRIVATE src/attach_options.c src/credentials.c src/tickets.c src/constraints.c)
+    target_include_directories(vgi PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_include_directories(vgi PRIVATE src)
+    target_link_libraries(vgi PUBLIC vgi::protocol)
+    target_link_libraries(vgi PRIVATE PkgConfig::JSONC PkgConfig::SODIUM Threads::Threads SQLite3::SQLite3)
+    if(UNIX)
+        target_link_libraries(vgi PRIVATE m)
+    endif()
+    set_target_properties(vgi PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    if(MSVC)
+        target_compile_options(vgi PRIVATE /W4)
+    else()
+        target_compile_options(vgi PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
-if(VGI_BUILD_EXAMPLES)
+if(VGI_BUILD_EXAMPLES AND VGI_BUILD_WORKER)
     add_subdirectory(example-worker)
     add_executable(vgi-protocol-info examples/protocol_info.c)
     target_link_libraries(vgi-protocol-info PRIVATE vgi::vgi)
@@ -67,10 +81,16 @@ endif()
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-install(TARGETS vgi EXPORT vgi-targets
+install(TARGETS vgi_protocol EXPORT vgi-targets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(VGI_BUILD_WORKER)
+    install(TARGETS vgi EXPORT vgi-targets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
 install(DIRECTORY include/vgi DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/vgi-c")
 install(EXPORT vgi-targets NAMESPACE vgi:: DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vgi")
@@ -83,7 +103,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/vgi-config.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/vgi-config-version.cmake"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vgi")
 
-if(VGI_BUILD_TESTS)
+if(VGI_BUILD_TESTS AND VGI_BUILD_WORKER)
     enable_testing()
     add_subdirectory(tests)
 endif()

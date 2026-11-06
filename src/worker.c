@@ -1783,7 +1783,7 @@ int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowEr
             !strcmp(argv[i], "--debug") || !strcmp(argv[i], "--threaded"))
             continue;
         if (!strcmp(argv[i], "--version")) {
-            puts("vgi-c 0.1.0");
+            puts("vgi-c 0.1.1");
             return 0;
         }
         if (!strcmp(argv[i], "--unix") || !strcmp(argv[i], "--tcp") || !strcmp(argv[i], "--http") ||
