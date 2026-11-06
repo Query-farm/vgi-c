@@ -185,7 +185,9 @@ http_version = '1.1'` on init):
 
 `aggregate/window.test` fails identically with the vgi-c++ v0.14 reference
 worker on that locally built aarch64 runner, so it is a property of the runner
-rather than of either SDK. The SQL skips require other fixture applications or services, such as the
+rather than of either SDK. It passes in CI, where all three lanes (stdio,
+launch, http) run against the published linux_amd64 native runner at
+`b3276d9` with no failures. The SQL skips require other fixture applications or services, such as the
 writable Python worker, dynamic-code workers, companion targets, Docker, and
 HTTP-specific version fixtures in the subprocess lane. They are not counted as
 executed passes. This is a tested protocol/SDK parity baseline, not a claim to
