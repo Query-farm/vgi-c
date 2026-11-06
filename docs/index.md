@@ -65,8 +65,10 @@ COPY TO, and cached results retained across later requests.
 `ci/run-integration.sh` stages the pinned suite for one transport (stdio,
 launch or http), enforces an allowlist of fixture-dependent skip reasons and an
 executed-case floor, and is what CI runs with the native runner built at the
-pinned VGI commit. The vgi.v3 validation executed 337 subprocess, 336 launcher
-and 330 HTTP cases without failures, plus the 2-case bearer lane.
+pinned VGI commit. The vgi.v3 / 3.1.0 validation (Linux aarch64, suite and
+runner at `b3276d9`) executed 338 subprocess, 337 launcher and 331 HTTP cases,
+plus the 2-case bearer lane; the only failure, `aggregate/window.test`, fails
+identically with the vgi-c++ reference worker on that runner.
 Eight native test groups also passed. The RPC package has independent shared
 server, native-client, sanitizer, and HTTPS validation documented in its
 [conformance guide](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/conformance.md).

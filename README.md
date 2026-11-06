@@ -15,7 +15,7 @@ The reusable transport, IPC, reflection, identity, and native client layer is
 library and owns VGI-specific worker behavior. See [the documentation](docs/index.md)
 for the split and build options.
 
-The SDK targets the `vgi-c++` VGI 3.0.0 (`vgi.v3`) behavior, with schemas generated from
+The SDK targets the `vgi-c++` VGI 3.1.0 (`vgi.v3`) behavior, with schemas generated from
 `vgi-python`. It implements scalar and table functions, streaming exchanges,
 buffered functions, grouped/window/streaming aggregates, immutable and mutable
 catalogs, version negotiation and time travel, attach options, settings and
@@ -164,24 +164,28 @@ The SHM lane exercises capability negotiation, segment reuse across unary calls,
 COPY TO, buffered functions, and retained cached results. Inline catalog/bind
 calls can share the same pooled worker connection.
 
-Validated on macOS arm64 for vgi.v3 with `ci/run-integration.sh` (suite at
-Query-farm/vgi `39ff88d`, `haybarn-unittest` 2.0.0rc10, community `vgi`
-extension `dc0cab9fa2`):
+Validated on Linux aarch64 for vgi.v3 / 3.1.0 with `ci/run-integration.sh`
+(suite and native runner both at Query-farm/vgi `b3276d9`; the runner was built
+locally because CI publishes only the linux_amd64 artifact; its libcurl lacks
+HTTP/2, so the strict test config also ran `LOAD httpfs; SET GLOBAL
+http_version = '1.1'` on init):
 
 | Check | Result |
 | --- | --- |
-| Subprocess SQL suite (368 staged) | 337 passed, 31 fixture-dependent skips; 13,965 assertions |
-| Launcher SQL suite (368 staged) | 336 passed, 32 fixture-dependent skips; 13,947 assertions |
-| HTTP SQL suite (365 staged) | 330 passed, 35 fixture-dependent skips; 14,335 assertions |
-| Protected bearer lane (HTTP) | 2 passed; 25 assertions |
+| Subprocess SQL suite (370 staged) | 338 executed: 337 passed, 1 failed (`aggregate/window.test`, see below), 32 fixture-dependent skips |
+| Launcher SQL suite (370 staged) | 337 executed: 336 passed, 1 failed (`aggregate/window.test`), 33 fixture-dependent skips |
+| HTTP SQL suite (367 staged) | 331 executed: 330 passed, 1 failed (`aggregate/window.test`), 36 fixture-dependent skips |
+| Protected bearer lane (HTTP) | 2 passed; 13 assertions |
 | Native C tests | 8 groups passed (also under `-DVGI_SANITIZE=ON`) |
-| Schema and IPC interoperability (vgi-python v0.48.2) | 258 exact schemas, 85 method signatures, 260 round trips, 9 malformed streams |
+| Schema and IPC interoperability (vgi-python v0.49.0) | 263 exact schemas, 85 method signatures, 265 round trips, 9 malformed streams |
 | Installed vgi-rpc-c consumer | Separate package configured, built, and tested |
 | Shared RPC conformance, separate vgi-rpc-c suite | 1,692 shared tests passed without skips |
 | Native RPC client against Python | 1,397 passed without skips; server-only tests deselected |
 
 
-The SQL skips require other fixture applications or services, such as the
+`aggregate/window.test` fails identically with the vgi-c++ v0.14 reference
+worker on that locally built aarch64 runner, so it is a property of the runner
+rather than of either SDK. The SQL skips require other fixture applications or services, such as the
 writable Python worker, dynamic-code workers, companion targets, Docker, and
 HTTP-specific version fixtures in the subprocess lane. They are not counted as
 executed passes. This is a tested protocol/SDK parity baseline, not a claim to
@@ -252,7 +256,12 @@ and selects what the client's `ClientCapabilities.catalog` offer accepts; the
 encode/decode/select helpers are public for custom attach handlers. Served
 tables are nullable except for fields a NOT_NULL or PRIMARY KEY record names.
 The memory catalog keeps metadata only, so it refuses constrained CREATE TABLE. `<vgi/cache.h>` renders cache advertisements;
-`<vgi/partition.h>` serializes typed partition bounds. `<vgi/filter.h>` applies
+`<vgi/partition.h>` serializes typed partition bounds. Protocol 3.1 distribution
+metadata is set by field name in a plan callback: `ScanSplit.key_value`,
+`range_index`, `column_bounds`, `location_ids`, and the plan's `key_grouping`,
+`range_partitioning`, and `locations`. Split sealing preserves those fields;
+`example-worker/splits.c` (`split_partitioned`) builds an identity
+`KeyGrouping` and one-row key tuples. `<vgi/filter.h>` applies
 predicates, tracks dynamic revisions, and exposes diagnostics and discrete
 column values. `<vgi/storage.h>` supplies transactions, key/value state, and
 atomic append/pop queues for worker pools.

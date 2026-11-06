@@ -1,7 +1,7 @@
 {
-  "protocol_version": "3.0.0",
+  "protocol_version": "3.1.0",
   "protocol_hash": "50e9404173bee3262e96b8939eb5c425463336abca2a17916812d68b6e0f6cad",
-  "binary_sha256": "6f3dd3265e4d79d85986b1b12372313122a9e466dfb51c1879e62c48a7da3cbc",
+  "binary_sha256": "48113366263db753ebb5a4de7a094d94ba40ee0425be9ef6941d5ab7ea522f88",
   "function_count": 270,
   "functions": [
     "main.accumulate",

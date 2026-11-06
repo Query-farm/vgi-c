@@ -20,6 +20,86 @@ static int64_t boundary(int64_t rows, int64_t i, int64_t count) {
     __extension__ typedef unsigned __int128 UInt128;
     return (int64_t)((UInt128)(uint64_t)rows * (uint64_t)i / (uint64_t)count);
 }
+static const char *const kCountries[] = {"US", "DE", "JP", "BR"};
+/* Serialize a finished one-batch VgiBatch as an IPC stream appended to out. */
+static int encode_batch(struct VgiBatch *batch, struct ArrowBuffer *out, struct ArrowError *error) {
+    int rc = VgiBatchFinishRow(batch, error);
+    if (!rc) rc = VgiIpcWriteBatch(&batch->schema, &batch->array, NULL, out, error);
+    return rc;
+}
+static int append_list_bytes(struct VgiBatch *batch, const char *name, struct ArrowBufferView v) {
+    struct ArrowArray *list = VgiBatchColumn(batch, name);
+    if (!list) return EINVAL;
+    int rc = ArrowArrayAppendBytes(list->children[0], v);
+    return rc ? rc : ArrowArrayFinishElement(list);
+}
+static struct ArrowBufferView view_of(const struct ArrowBuffer *b) {
+    return (struct ArrowBufferView){{b->data}, b->size_bytes};
+}
+/* Protocol 3.1 KeyGrouping claiming identity(column): every split holds
+ * exactly one value of that column. */
+static int identity_key_grouping(const char *column, struct ArrowBuffer *out,
+                                 struct ArrowError *error) {
+    struct VgiBatch path = {0}, transform = {0}, grouping = {0};
+    struct ArrowBuffer path_bytes, transform_bytes;
+    ArrowBufferInit(&path_bytes);
+    ArrowBufferInit(&transform_bytes);
+    int rc = VgiBatchInitNamed(&path, "FieldPath", error);
+    if (!rc)
+        rc = append_list_bytes(&path, "components",
+                               (struct ArrowBufferView){{column}, (int64_t)strlen(column)});
+    if (!rc) rc = encode_batch(&path, &path_bytes, error);
+    if (!rc) rc = VgiBatchInitNamed(&transform, "TransformSpec", error);
+    if (!rc) rc = VgiBatchSetString(&transform, "id", "vgi.identity/1");
+    if (!rc) rc = append_list_bytes(&transform, "inputs", view_of(&path_bytes));
+    if (!rc) rc = encode_batch(&transform, &transform_bytes, error);
+    if (!rc) rc = VgiBatchInitNamed(&grouping, "KeyGrouping", error);
+    if (!rc) rc = append_list_bytes(&grouping, "keys", view_of(&transform_bytes));
+    if (!rc) rc = encode_batch(&grouping, out, error);
+    VgiBatchReset(&path);
+    VgiBatchReset(&transform);
+    VgiBatchReset(&grouping);
+    ArrowBufferReset(&path_bytes);
+    ArrowBufferReset(&transform_bytes);
+    return rc;
+}
+/* The split's exact key tuple, a one-row {country} batch. Test-only modes
+ * produce the malformed shapes the engine must reject: missing (no key),
+ * two_rows and wrong_type (int64 instead of utf8). Returns ENODATA when the
+ * split carries no key. */
+static int partition_key_value(const char *country, struct ArrowStringView mode,
+                               struct ArrowBuffer *out, struct ArrowError *error) {
+    int wrong_type = mode.size_bytes == 10 && !memcmp(mode.data, "wrong_type", 10);
+    int two_rows = mode.size_bytes == 8 && !memcmp(mode.data, "two_rows", 8);
+    if (mode.size_bytes == 7 && !memcmp(mode.data, "missing", 7)) return ENODATA;
+    struct ArrowSchema schema = {0};
+    struct VgiBatch key = {0};
+    ArrowSchemaInit(&schema);
+    int rc = ArrowSchemaSetTypeStruct(&schema, 1);
+    if (!rc)
+        rc = ArrowSchemaSetType(schema.children[0],
+                                wrong_type ? NANOARROW_TYPE_INT64 : NANOARROW_TYPE_STRING);
+    if (!rc) rc = ArrowSchemaSetName(schema.children[0], "country");
+    if (!rc) rc = VgiBatchInit(&key, &schema, error);
+    if (!rc && wrong_type) rc = VgiBatchSetInt(&key, "country", 1);
+    if (!rc && !wrong_type) rc = VgiBatchSetString(&key, "country", country);
+    if (!rc && two_rows) {
+        rc = VgiBatchFinishRow(&key, error);
+        if (!rc) rc = VgiBatchSetString(&key, "country", country);
+    }
+    if (!rc) rc = encode_batch(&key, out, error);
+    VgiBatchReset(&key);
+    ArrowSchemaRelease(&schema);
+    return rc;
+}
+static int known_key_mode(struct ArrowStringView mode) {
+    const char *modes[] = {"valid", "missing", "two_rows", "wrong_type"};
+    for (size_t i = 0; i < sizeof(modes) / sizeof(*modes); ++i)
+        if ((int64_t)strlen(modes[i]) == mode.size_bytes &&
+            !memcmp(mode.data, modes[i], (size_t)mode.size_bytes))
+            return 1;
+    return 0;
+}
 int ExampleSplitSupported(const char *name) {
     const char *names[] = {"split_sequence",       "split_empty_ranges",   "split_zero",
                            "split_skewed",         "split_many",           "split_stale_plan",
@@ -89,8 +169,22 @@ int ExampleSplitPlan(void *data, struct VgiFunctionCall *call, const char *metho
                                   ArrowArrayViewListChildOffset(projection, 0)
                             : 0;
     if (projected >= 3) projected = 0;
-    struct ArrowBuffer report;
+    struct ArrowBuffer report, key;
     ArrowBufferInit(&report);
+    ArrowBufferInit(&key);
+    struct ArrowStringView key_mode = {"valid", 5};
+    if (named(f, "split_partitioned")) {
+        struct ArrowStringView given = VgiArgumentString(call, -1, "key_mode");
+        if (given.data) key_mode = given;
+        if (!known_key_mode(key_mode)) {
+            char message[160];
+            snprintf(message, sizeof(message), "unknown split_partitioned key_mode: %.*s",
+                     (int)(key_mode.size_bytes > 64 ? 64 : key_mode.size_bytes), key_mode.data);
+            return VgiRpcFail(call->rpc, "RuntimeError", "INVALID_ARGUMENT", "", message);
+        }
+        if (!rc) rc = identity_key_grouping("country", &key, &call->rpc->error);
+        if (!rc) rc = VgiBatchSetBytes(result, "key_grouping", key.data, key.size_bytes);
+    }
     if (!rc) rc = VgiFiltersFormat(call->filters, 0, &report, &call->rpc->error);
     int has_filters = report.size_bytes != 6 || memcmp(report.data, "(none)", 6);
     ArrowBufferReset(&report);
@@ -136,10 +230,18 @@ int ExampleSplitPlan(void *data, struct VgiFunctionCall *call, const char *metho
         if (!rc) rc = VgiBatchSetBytes(&split, "payload", payload, 16 + offset);
         if (!rc && exact) rc = VgiBatchSetInt(&split, "estimated_rows", estimated);
         if (!rc) rc = VgiBatchSetInt(&split, "rows_exact", exact);
+        if (!rc && named(f, "split_partitioned")) {
+            key.size_bytes = 0;
+            int has_key = partition_key_value(kCountries[i], key_mode, &key, &call->rpc->error);
+            rc = has_key == ENODATA ? 0 : has_key;
+            if (!rc && has_key != ENODATA)
+                rc = VgiBatchSetBytes(&split, "key_value", key.data, key.size_bytes);
+        }
         if (!rc) rc = VgiBatchFinishRow(&split, &call->rpc->error);
         if (!rc) rc = VgiPlanAppendSplit(result, &split, &call->rpc->error);
         VgiBatchReset(&split);
     }
+    ArrowBufferReset(&key);
     if (!rc) rc = ArrowArrayFinishElement(VgiBatchColumn(result, "splits"));
     if (!rc &&
         ((named(f, "split_paginated") && last < count) || named(f, "split_endless_cursor"))) {
@@ -298,14 +400,13 @@ int ExampleSplitProcess(void *data, struct VgiFunctionCall *call, const struct V
         }
         if (!rc && !report.size_bytes) rc = ArrowBufferAppend(&report, "(none)", 6);
     }
-    const char *countries[] = {"US", "DE", "JP", "BR"};
     for (int64_t row = begin; !rc && row < end; ++row) {
         for (int64_t col = 0; !rc && col < out->schema.n_children; ++col) {
             const char *name = out->schema.children[col]->name;
             struct ArrowArray *a = out->array.children[col];
             if (partition)
                 rc = !strcmp(name, "country")
-                         ? ArrowArrayAppendString(a, ArrowCharView(countries[range->begin]))
+                         ? ArrowArrayAppendString(a, ArrowCharView(kCountries[range->begin]))
                          : ArrowArrayAppendInt(a, range->begin * 100 + row + 1);
             else if (echo) {
                 struct SplitRange *value = &s->ranges[row];

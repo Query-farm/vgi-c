@@ -21,8 +21,8 @@ concurrency:
 
 env:
   # Test sources and the statically linked native runner come from this exact
-  # VGI commit (protocol vgi.v3 / 3.0.0).
-  VGI_REF: 39ff88d7feb18e444d1a02d2e563c8eea577dfba
+  # VGI commit (protocol vgi.v3 / 3.1.0).
+  VGI_REF: b3276d91fb2834578cbef437b1d62383fda3da32
   VGI_NATIVE_RUNNER_BRANCH: v2.0
   # The vgi-rpc-c revision this SDK builds against.
   VGI_RPC_C_REF: main

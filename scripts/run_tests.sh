@@ -31,7 +31,7 @@ WRAPPER
 done
 cat > "$VGI_C_TEST_CACHE/bad_protocol.sh" <<'WRAPPER'
 #!/usr/bin/env bash
-export VGI_PROTOCOL_VERSION_OVERRIDE=99.0.0
+export VGI_PROTOCOL_VERSION_OVERRIDE=3.0.0
 exec "$VGI_C_BINARY" "$@" 2>>"$VGI_C_TEST_CACHE/worker.log"
 WRAPPER
 chmod +x "$VGI_C_TEST_CACHE/bad_protocol.sh"
