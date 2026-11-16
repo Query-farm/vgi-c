@@ -16,6 +16,7 @@
 #   STAGE            scratch dir for the preprocessed test tree (default: mktemp)
 #   RUNNER_LINKS_EXTENSIONS  1 for a matching native runner; keep require gates
 #   MIN_EXECUTED     executed-case floor (see below)
+#   VGI_ENGINE_*     engine features of the runner (see the engine-gated files below)
 set -uo pipefail # not -e: the suite exit code is managed explicitly
 
 : "${VGI_SRC:?path to a Query-farm/vgi checkout}"
@@ -214,7 +215,25 @@ EXPECTED_SKIP_REASONS=(
   'require-env VGI_ROWID_CONSTRAINT_WORKER'      # hostile rowid-constraint fixture (vgi test/support)
   'require-env VGI_ATTACH_OPTIONS_HTTP_WORKER'   # attach-options over http, not booted here
   'require-env VGI_TEST_ICEBERG'                 # multi-branch Iceberg fixture tree
+  'require-env VGI_DOCKER_TX_IMAGE'              # containerised txfix worker
+  'require-env VGI_SECRET_LOOKUP_FIXTURES'       # secret-lookup conformance fixtures, not implemented
+  'require-env VGI_WRITABLE_TX_FIXTURES'         # txfix writable-table worker, not shipped by this SDK
+  'require-env VGI_VISIBILITY_WORKER'            # extension-only visibility fixture (vgi test/support)
+  'require-env VGI_WRITE_CONTRACT_WORKER'        # extension-only write-contract fixture (vgi test/support)
 )
+# Engine-gated files (vgi Makefile VGI_ENGINE_TEST_VARS). Export each VGI_ENGINE_*
+# var the runner's engine supports (=1; for a Haybarn runner, from the vgi
+# checkout's `make -s engine_test_env`): the files for engines without the
+# feature then skip with "require-env-not V", and on an engine lacking it the
+# files that need it skip with "require-env V 1". Exactly one side runs.
+for engine_var in VGI_ENGINE_CORRELATED_NAMED_ARGS VGI_ENGINE_DELETE_RETURNING_VIRTUAL_COLUMNS; do
+  if [ "${!engine_var:-}" = "1" ]; then
+    export "$engine_var=1"
+    EXPECTED_SKIP_REASONS+=("require-env-not $engine_var")
+  else
+    EXPECTED_SKIP_REASONS+=("require-env $engine_var 1")
+  fi
+done
 if [ "${RUNNER_LINKS_EXTENSIONS:-0}" = "1" ]; then
   # The development runner omits spatial; no signed spatial build matches it.
   EXPECTED_SKIP_REASONS+=('require spatial')

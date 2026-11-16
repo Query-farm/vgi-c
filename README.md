@@ -15,7 +15,7 @@ The reusable transport, IPC, reflection, identity, and native client layer is
 library and owns VGI-specific worker behavior. See [the documentation](docs/index.md)
 for the split and build options.
 
-The SDK targets the `vgi-c++` VGI 3.1.0 (`vgi.v3`) behavior, with schemas generated from
+The SDK speaks VGI protocol `vgi.v3` / 3.3.0, with schemas generated from
 `vgi-python`. It implements scalar and table functions, streaming exchanges,
 buffered functions, grouped/window/streaming aggregates, immutable and mutable
 catalogs, version negotiation and time travel, attach options, settings and
@@ -164,34 +164,28 @@ The SHM lane exercises capability negotiation, segment reuse across unary calls,
 COPY TO, buffered functions, and retained cached results. Inline catalog/bind
 calls can share the same pooled worker connection.
 
-Validated on Linux aarch64 for vgi.v3 / 3.1.0 with `ci/run-integration.sh`
-(suite and native runner both at Query-farm/vgi `b3276d9`; the runner was built
-locally because CI publishes only the linux_amd64 artifact; its libcurl lacks
-HTTP/2, so the strict test config also ran `LOAD httpfs; SET GLOBAL
-http_version = '1.1'` on init):
+Validated on Linux aarch64 for vgi.v3 / 3.3.0 with `ci/run-integration.sh`
+(suite and native Haybarn runner both at Query-farm/vgi `b559975`, with
+`VGI_ENGINE_CORRELATED_NAMED_ARGS=1` and
+`VGI_ENGINE_DELETE_RETURNING_VIRTUAL_COLUMNS=1` from its `make engine_test_env`):
 
 | Check | Result |
 | --- | --- |
-| Subprocess SQL suite (370 staged) | 338 executed: 337 passed, 1 failed (`aggregate/window.test`, see below), 32 fixture-dependent skips |
-| Launcher SQL suite (370 staged) | 337 executed: 336 passed, 1 failed (`aggregate/window.test`), 33 fixture-dependent skips |
-| HTTP SQL suite (367 staged) | 331 executed: 330 passed, 1 failed (`aggregate/window.test`), 36 fixture-dependent skips |
-| Protected bearer lane (HTTP) | 2 passed; 13 assertions |
-| Native C tests | 8 groups passed (also under `-DVGI_SANITIZE=ON`) |
-| Schema and IPC interoperability (vgi-python v0.49.0) | 263 exact schemas, 85 method signatures, 265 round trips, 9 malformed streams |
-| Installed vgi-rpc-c consumer | Separate package configured, built, and tested |
-| Shared RPC conformance, separate vgi-rpc-c suite | 1,692 shared tests passed without skips |
-| Native RPC client against Python | 1,397 passed without skips; server-only tests deselected |
+| Subprocess SQL suite (420 staged) | 352 executed, all passed; 68 fixture-dependent skips |
+| Launcher SQL suite (420 staged) | 353 executed, all passed; 67 fixture-dependent skips |
+| HTTP SQL suite (417 staged) | 347 executed, all passed; 70 fixture-dependent skips |
+| Protected bearer lane (HTTP) | 2 passed |
+| Native C tests | 8 groups passed (also under `-DVGI_SANITIZE=ON` with Clang) |
+| Schema and IPC interoperability (vgi-python v0.52.0) | 263 exact schemas, 84 method signatures, 265 round trips, 9 malformed streams |
+| RPC, continuation and cancellation checks (vgi-python v0.52.0) | passed |
 
-
-`aggregate/window.test` fails identically with the vgi-c++ v0.14 reference
-worker on that locally built aarch64 runner, so it is a property of the runner
-rather than of either SDK. It passes in CI, where all three lanes (stdio,
-launch, http) run against the published linux_amd64 native runner at
-`b3276d9` with no failures. The SQL skips require other fixture applications or services, such as the
-writable Python worker, dynamic-code workers, companion targets, Docker, and
-HTTP-specific version fixtures in the subprocess lane. They are not counted as
-executed passes. This is a tested protocol/SDK parity baseline, not a claim to
-implement every optional deployment feature of the separate `vgi-rpc-c++` package.
+The SQL skips require other fixture applications or services, such as the
+writable-table (`txfix`) worker, the extension's own visibility and
+write-contract fixtures, secret-lookup fixtures, dynamic-code workers, companion
+targets, Docker, and HTTP-specific version fixtures in the subprocess lane. They
+are not counted as executed passes. This is a tested protocol/SDK parity
+baseline, not a claim to implement every optional deployment feature of the
+separate `vgi-rpc-c++` package.
 The Identity baseline is its two-method protocol; generated schemas also include
 newer Python Identity methods, which are not advertised by this C implementation.
 
@@ -265,7 +259,35 @@ metadata is set by field name in a plan callback: `ScanSplit.key_value`,
 `example-worker/splits.c` (`split_partitioned`) builds an identity
 `KeyGrouping` and one-row key tuples. `<vgi/filter.h>` applies
 predicates, tracks dynamic revisions, and exposes diagnostics and discrete
-column values. `<vgi/storage.h>` supplies transactions, key/value state, and
+column values.
+
+Protocol 3.2 filtered scan planning: a table whose `TableInfo.scan_planning` is
+`VGI_SCAN_PLANNING_FILTERED` receives the query's predicates in
+`catalog_table_scan_branches_get`. A catalog handler decodes them with
+`VgiScanPlanningFiltersParse()` against the table's declared columns (NULL when
+none were sent) and prunes candidate files or branches with
+`VgiFiltersMayMatch()`, which keeps anything its `VgiColumnStatistics` cannot
+rule out. Predicates are advisory: returning extra branches is correct, dropping
+one that holds a matching row is not. Zero branches are legal for a filtered
+table. `ScanBranch.row_count` and `column_statistics` (a `<vgi/statistics.h>`
+batch) are set by field name; the client prunes branches whose statistics or
+`branch_filter` contradict the query. Served tables default `scan_planning` to
+`"bind"`, and a table with another value, or a filtered table that inlines
+`scan_function`, is refused. `example-worker/scan_planning.c` implements the
+shared suite's `planned_days*` fixtures.
+
+Protocol 3.3 function visibility: `FunctionInfo.visibility` is null (public),
+`VGI_FUNCTION_VISIBILITY_PUBLIC` or `VGI_FUNCTION_VISIBILITY_TABLE_ONLY`;
+registration refuses anything else. Every function a table names (its scan and
+write functions) must be listed so the client knows its capabilities. Write
+functions are `table_only`; a scan is `table_only` unless it is also meant to be
+called from SQL. A function registered with `visibility = "table_only"` is added
+to its schema's listing in each declarative catalog of the same name that does
+not list it already, so register it before that catalog. Protocol 3.3 also
+removes `catalog_table_scan_function_get` (catalogs answer
+`catalog_table_scan_branches_get`, one branch for a single-source table), and
+`catalog_table_create` answers `created`: the memory catalog returns false only
+for `IF NOT EXISTS` on an existing table. `<vgi/storage.h>` supplies transactions, key/value state, and
 atomic append/pop queues for worker pools.
 
 ## HTTP and delegated access

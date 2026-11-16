@@ -65,10 +65,11 @@ COPY TO, and cached results retained across later requests.
 `ci/run-integration.sh` stages the pinned suite for one transport (stdio,
 launch or http), enforces an allowlist of fixture-dependent skip reasons and an
 executed-case floor, and is what CI runs with the native runner built at the
-pinned VGI commit. The vgi.v3 / 3.1.0 validation (Linux aarch64, suite and
-runner at `b3276d9`) executed 338 subprocess, 337 launcher and 331 HTTP cases,
-plus the 2-case bearer lane; the only failure, `aggregate/window.test`, fails
-identically with the vgi-c++ reference worker on that runner.
+pinned VGI commit. The vgi.v3 / 3.3.0 validation (Linux aarch64, suite and
+native runner at `b559975`) executed 352 subprocess, 353 launcher and 347 HTTP
+cases with no failures, plus the 2-case bearer lane. A Haybarn runner needs the
+`VGI_ENGINE_*` variables from the vgi checkout's `make -s engine_test_env`
+exported, as CI's runner download does.
 Eight native test groups also passed. The RPC package has independent shared
 server, native-client, sanitizer, and HTTPS validation documented in its
 [conformance guide](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/conformance.md).
