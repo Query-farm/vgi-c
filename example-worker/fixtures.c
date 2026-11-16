@@ -39,6 +39,10 @@ static int register_catalogs(struct VgiWorker *worker, struct ArrowError *error)
             rc = VgiBatchDecode(destinations[i],
                                 (struct ArrowBufferView){{bytes.data}, bytes.size_bytes}, error);
         }
+        struct ArrowStringView catalog_name = VgiValueString(VgiBatchGet(&catalogs, "name"), row);
+        if (!rc && !version.size_bytes && catalog_name.size_bytes == 7 &&
+            !memcmp(catalog_name.data, "example", 7))
+            rc = ExampleScanPlanningContents(&contents, error);
         int64_t id = VgiFieldIndex(&catalogs.schema, "extras");
         if (!rc && id >= 0) {
             const struct ArrowSchema *schema = catalogs.schema.children[id]->children[0];
@@ -115,6 +119,8 @@ static int register_hidden(struct VgiWorker *worker, struct ArrowError *error) {
     fn.init = ExampleCacheInit;
     fn.process = ExampleCacheProcess;
     fn.finalize = ExampleCacheFree;
+    /* data.cache_multicol scans it; only the table is SQL-visible (protocol 3.3). */
+    rc = VgiBatchSetString(&fn.info, "visibility", VGI_FUNCTION_VISIBILITY_TABLE_ONLY);
     if (!rc) rc = VgiWorkerRegisterFunction(worker, &fn, error);
     VgiFunctionReset(&fn);
     return rc;

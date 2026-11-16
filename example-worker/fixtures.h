@@ -79,6 +79,11 @@ int ExampleCacheProcess(void *, struct VgiFunctionCall *, const struct VgiBatch 
                         struct VgiBatch *, struct ArrowBuffer *, int *);
 int64_t ExampleCacheWorkers(void *, struct VgiFunctionCall *);
 int ExampleCatalogHandler(void *, struct VgiRpcCall *, struct VgiRpcReply *, int *);
+/* Protocol 3.2 scan planning fixtures (scan_planning.c): add their TableInfo
+ * records to the example catalog's "data" schema, and answer their
+ * catalog_table_scan_branches_get calls. */
+int ExampleScanPlanningContents(struct VgiBatch *contents, struct ArrowError *error);
+int ExampleScanPlanningHandler(struct VgiRpcCall *call, struct VgiRpcReply *reply, int *handled);
 int ExampleTableExtraSupported(const char *name);
 int ExampleTableExtraBind(void *, struct VgiFunctionCall *, struct ArrowSchema *);
 int ExampleTableExtraInit(void *, struct VgiFunctionCall *);

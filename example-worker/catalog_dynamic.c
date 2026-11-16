@@ -12,8 +12,9 @@ int ExampleCatalogHandler(void *state, struct VgiRpcCall *call, struct VgiRpcRep
                           int *handled) {
     *handled = 0;
     const char *method = call->method->name;
-    if (strcmp(method, "catalog_table_get") && strcmp(method, "catalog_table_scan_function_get") &&
-        strcmp(method, "catalog_table_scan_branches_get"))
+    int planned = ExampleScanPlanningHandler(call, reply, handled);
+    if (planned || *handled) return planned;
+    if (strcmp(method, "catalog_table_get") && strcmp(method, "catalog_table_scan_branches_get"))
         return 0;
     if (!text_is(VgiBatchString(&call->request, "name"), "cache_versioned")) return 0;
     *handled = 1;
