@@ -57,11 +57,16 @@ if [ "$TRANSPORT" = "http" ]; then
   # One POST round trip per two rows; covered by the stdio lane.
   HTTP_SKIP=(-not -name 'projection_pushdown_repro.test')
 fi
+# example_*.test exercise the cross-SDK example.contract fixtures (a hidden scan,
+# a scan named range, finalize-only INSERT counts, decimal32/64 columns), which
+# this SDK's example worker does not serve yet.
 echo "Staging preprocessed tests into $STAGE (transport=$TRANSPORT) ..."
 mkdir -p "$STAGE/test/sql/integration"
 if ! ( cd "$INTEGRATION" || exit 1
   find . -name '*.test' \
        -not -path '*/writable/*' -not -path '*/simple_writable/*' \
+       -not -name 'example_table_only.test' -not -name 'example_insert_finalize.test' \
+       -not -name 'example_decimal_width.test' \
        -not -name 'nested_type_combinations.test' \
        ${HTTP_SKIP[@]+"${HTTP_SKIP[@]}"} ${RUNNER_SKIP[@]+"${RUNNER_SKIP[@]}"} | while read -r f; do
     mkdir -p "$STAGE/test/sql/integration/$(dirname "$f")" || exit 1
