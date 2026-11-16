@@ -40,6 +40,12 @@ typedef int (*VgiCatalogFunctionVisitor)(void *state, const char *schema,
                                          const struct VgiBatch *function, struct ArrowError *);
 int VgiCatalogContentsFunctions(const struct VgiBatch *contents, VgiCatalogFunctionVisitor,
                                 void *state, struct ArrowError *);
+/* Copy declarative contents into out (initialized here) with record appended
+ * to the listing field ("table_functions", ...) of the schema whose dotted path
+ * is schema. ENOENT when contents has no such schema. */
+int VgiCatalogContentsAppend(const struct VgiBatch *contents, const char *schema, const char *field,
+                             struct ArrowBufferView record, struct VgiBatch *out,
+                             struct ArrowError *error);
 /* The same over every catalog a service holds: base contents and snapshots. */
 typedef int (*VgiCatalogEntryVisitor)(void *state, const char *catalog, const char *schema,
                                       const struct VgiBatch *function, struct ArrowError *);

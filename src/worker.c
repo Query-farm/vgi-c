@@ -264,6 +264,29 @@ static int refuse_shared_entry(const struct VgiFunction *function, const char *c
                   name.data);
     return EINVAL;
 }
+/* FunctionInfo.visibility (protocol 3.3) is null, "public" or "table_only";
+ * the client refuses a listing that carries any other value. */
+static int check_visibility(const struct VgiBatch *entry, const char *catalog, const char *schema,
+                            struct ArrowError *error) {
+    const struct ArrowArrayView *column = VgiBatchGet(entry, "visibility");
+    if (!column || !column->length || ArrowArrayViewIsNull(column, 0)) return 0;
+    struct ArrowStringView value = VgiValueString(column, 0);
+    if (text_is(value, VGI_FUNCTION_VISIBILITY_PUBLIC) ||
+        text_is(value, VGI_FUNCTION_VISIBILITY_TABLE_ONLY))
+        return 0;
+    struct ArrowStringView name = VgiBatchString(entry, "name");
+    ArrowErrorSet(error,
+                  "%s.%s.%.*s: unknown FunctionInfo.visibility '%.*s' (expected '%s' or '%s')",
+                  catalog, schema, (int)name.size_bytes, name.data ? name.data : "",
+                  (int)value.size_bytes, value.data ? value.data : "",
+                  VGI_FUNCTION_VISIBILITY_PUBLIC, VGI_FUNCTION_VISIBILITY_TABLE_ONLY);
+    return EINVAL;
+}
+static int is_table_only(const struct VgiFunction *function) {
+    const struct ArrowArrayView *column = VgiBatchGet(&function->info, "visibility");
+    return column && column->length && !ArrowArrayViewIsNull(column, 0) &&
+           text_is(VgiValueString(column, 0), VGI_FUNCTION_VISIBILITY_TABLE_ONLY);
+}
 struct EntryCheck {
     const struct VgiFunction *function;
     struct VgiWorker *worker;
@@ -277,7 +300,7 @@ static int check_entry_against_function(void *state, const char *catalog, const 
 static int check_entry_against_worker(void *state, const char *schema, const struct VgiBatch *entry,
                                       struct ArrowError *error) {
     struct EntryCheck *check = state;
-    int rc = 0;
+    int rc = check_visibility(entry, check->catalog, schema, error);
     for (size_t i = 0; !rc && i < check->worker->function_count; ++i)
         rc = refuse_shared_entry(&check->worker->functions[i].function, check->catalog, schema,
                                  entry, error);
@@ -304,6 +327,15 @@ int VgiWorkerRegisterFunction(struct VgiWorker *worker, struct VgiFunction *func
     if (!rc && !schema_path->length) rc = append_path(schema_path, path);
     if (!rc && !function->info.array.length) rc = VgiBatchFinishRow(&function->info, error);
     if (!rc) rc = check_registration(function, error);
+    if (!rc) rc = check_visibility(&function->info, catalog, path, error);
+    if (!rc && is_table_only(function) && VgiCatalogInfo(worker->catalog_service, catalog)) {
+        struct ArrowStringView name = VgiBatchString(&function->info, "name");
+        ArrowErrorSet(error,
+                      "%s.%.*s: register a table_only function before the declarative catalog "
+                      "%s, which lists it",
+                      path, (int)name.size_bytes, name.data, catalog);
+        rc = EINVAL;
+    }
     if (!rc && function->resume) {
         struct VgiFunction placed = *function;
         placed.catalog = catalog;
@@ -534,13 +566,72 @@ int VgiWorkerSetCatalogVersions(struct VgiWorker *worker, const char *name,
                                 struct ArrowError *error) {
     return VgiCatalogSetVersions(worker->catalog_service, name, versions, error);
 }
+/* A registered function whose FunctionInfo says visibility table_only is one a
+ * table names (its scan or a write function) and must be listed, hidden, so the
+ * client knows its capabilities (protocol 3.3). A declarative catalog's contents
+ * are the author's listing; add each such function of that catalog to its
+ * schema's listing unless the contents already list it. */
+struct Listed {
+    const struct RegisteredFunction *function;
+    int found;
+};
+static int find_listed(void *state, const char *schema, const struct VgiBatch *entry,
+                       struct ArrowError *error) {
+    (void)error;
+    struct Listed *listed = state;
+    if (!strcmp(schema, listed->function->schema) &&
+        text_is(VgiBatchString(entry, "name"), listed->function->name))
+        listed->found = 1;
+    return 0;
+}
+static int list_table_only(struct VgiWorker *worker, const char *catalog,
+                           const struct VgiBatch *contents, struct VgiBatch *out,
+                           struct ArrowError *error) {
+    int rc = 0;
+    const struct VgiBatch *current = contents;
+    for (size_t i = 0; !rc && contents && i < worker->function_count; ++i) {
+        const struct RegisteredFunction *fn = &worker->functions[i];
+        if (strcmp(fn->catalog, catalog) || !is_table_only(&fn->function)) continue;
+        struct Listed listed = {fn, 0};
+        rc = VgiCatalogContentsFunctions(current, find_listed, &listed, error);
+        if (rc || listed.found) continue;
+        struct ArrowBuffer bytes;
+        ArrowBufferInit(&bytes);
+        rc = VgiIpcWriteBatch(&fn->function.info.schema, &fn->function.info.array, NULL, &bytes,
+                              error);
+        const char *field = fn->function.kind == VGI_SCALAR      ? "scalar_functions"
+                            : fn->function.kind == VGI_AGGREGATE ? "aggregate_functions"
+                                                                 : "table_functions";
+        struct VgiBatch next = {0};
+        if (!rc)
+            rc = VgiCatalogContentsAppend(current, fn->schema, field,
+                                          (struct ArrowBufferView){{bytes.data}, bytes.size_bytes},
+                                          &next, error);
+        if (rc == ENOENT)
+            ArrowErrorSet(error,
+                          "%s: table_only function %s.%s cannot be listed: the catalog declares "
+                          "no schema %s",
+                          catalog, fn->schema, fn->name, fn->schema);
+        ArrowBufferReset(&bytes);
+        if (rc) break;
+        if (current == out) VgiBatchReset(out);
+        *out = next;
+        current = out;
+    }
+    if (rc && current == out) VgiBatchReset(out);
+    return rc;
+}
 int VgiWorkerAddCatalogSnapshot(struct VgiWorker *worker, const char *name, const char *version,
                                 const struct VgiBatch *contents, const struct VgiBatch *extras,
                                 struct ArrowError *error) {
+    struct VgiBatch listed = {0};
     int rc = check_catalog_contents(worker, name, contents, error);
-    return rc ? rc
-              : VgiCatalogAddSnapshot(worker->catalog_service, name, version, contents, extras,
-                                      error);
+    if (!rc) rc = list_table_only(worker, name, contents, &listed, error);
+    if (!rc)
+        rc = VgiCatalogAddSnapshot(worker->catalog_service, name, version,
+                                   listed.array.release ? &listed : contents, extras, error);
+    VgiBatchReset(&listed);
+    return rc;
 }
 int VgiWorkerRegisterCatalog(struct VgiWorker *worker, const struct VgiBatch *info,
                              const struct VgiBatch *attach, const struct VgiBatch *contents,
@@ -548,9 +639,15 @@ int VgiWorkerRegisterCatalog(struct VgiWorker *worker, const struct VgiBatch *in
     if (!worker || !info) return EINVAL;
     struct ArrowStringView catalog = VgiBatchString(info, "name");
     char *name = catalog.data ? text_view(catalog) : NULL;
+    struct VgiBatch listed = {0};
     int rc = name ? check_catalog_contents(worker, name, contents, error) : 0;
+    if (!rc && name) rc = list_table_only(worker, name, contents, &listed, error);
     free(name);
-    return rc ? rc : VgiCatalogAdd(&worker->catalog_service, info, attach, contents, extras, error);
+    if (!rc)
+        rc = VgiCatalogAdd(&worker->catalog_service, info, attach,
+                           listed.array.release ? &listed : contents, extras, error);
+    VgiBatchReset(&listed);
+    return rc;
 }
 int VgiWorkerRegisterCopyFormat(struct VgiWorker *worker, const struct VgiBatch *info,
                                 struct ArrowError *error) {

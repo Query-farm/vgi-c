@@ -492,8 +492,7 @@ static int extra_reply(struct Catalog *catalog, struct VgiRpcCall *call, struct 
     const struct VgiBatch *e = &catalog->extras;
     const char *method = call->method->name;
     int table = !strcmp(method, "catalog_table_get"),
-        scan = !strcmp(method, "catalog_table_scan_function_get") ||
-               !strcmp(method, "catalog_table_scan_branches_get"),
+        scan = !strcmp(method, "catalog_table_scan_branches_get"),
         stats = !strcmp(method, "catalog_table_column_statistics_get");
     if (!table && !scan && !stats) return 0;
     int64_t mi = VgiFieldIndex(&e->schema, "method"), pi = VgiFieldIndex(&e->schema, "path"),
@@ -809,8 +808,7 @@ int VgiCatalogDispatch(struct VgiCatalogService *service, const char *primary,
                 }
             }
             if (!rc) rc = ArrowArrayFinishElement(VgiBatchColumn(&result, "items"));
-        } else if (!strcmp(method, "catalog_table_scan_function_get") ||
-                   !strcmp(method, "catalog_table_scan_branches_get")) {
+        } else if (!strcmp(method, "catalog_table_scan_branches_get")) {
             int found = 0;
             const struct VgiBatch *extra = &catalog->extras;
             int64_t mi = VgiFieldIndex(&extra->schema, "method"),
@@ -1000,6 +998,74 @@ void VgiCatalogCollectionsDigest(const struct ArrowBuffer collections[VGI_CATALO
     unsigned char hash[32];
     crypto_hash_sha256_final(&state, hash);
     sodium_bin2hex(hex, 65, hash, sizeof(hash));
+}
+static int entry_path_is(const struct ArrowArrayView *parts, int64_t row, const char *dotted) {
+    struct ArrowBuffer path;
+    ArrowBufferInit(&path);
+    int rc = 0;
+    for (int64_t i = ArrowArrayViewListChildOffset(parts, row);
+         !rc && i < ArrowArrayViewListChildOffset(parts, row + 1); ++i) {
+        struct ArrowStringView part = VgiValueString(parts->children[0], i);
+        if (path.size_bytes) rc = ArrowBufferAppend(&path, ".", 1);
+        if (!rc && part.size_bytes) rc = ArrowBufferAppend(&path, part.data, part.size_bytes);
+    }
+    if (!rc && !path.size_bytes) rc = ArrowBufferAppend(&path, "main", 4);
+    int same = !rc && path.size_bytes == (int64_t)strlen(dotted) &&
+               !memcmp(path.data, dotted, (size_t)path.size_bytes);
+    ArrowBufferReset(&path);
+    return same;
+}
+int VgiCatalogContentsAppend(const struct VgiBatch *contents, const char *schema, const char *field,
+                             struct ArrowBufferView record, struct VgiBatch *out,
+                             struct ArrowError *error) {
+    int64_t schemas_id = VgiFieldIndex(&contents->schema, "schemas");
+    if (schemas_id < 0 || contents->array.length != 1) return EINVAL;
+    const struct ArrowSchema *entry_schema = contents->schema.children[schemas_id]->children[0];
+    int64_t path_id = VgiFieldIndex(entry_schema, "path"),
+            field_id = VgiFieldIndex(entry_schema, field);
+    if (path_id < 0 || field_id < 0) return EINVAL;
+    int rc = VgiBatchInit(out, &contents->schema, error), found = 0;
+    for (int64_t f = 0; !rc && f < contents->schema.n_children; ++f) {
+        if (f != schemas_id) {
+            rc = VgiArrayAppendValue(out->array.children[f], out->schema.children[f],
+                                     contents->view.children[f], contents->schema.children[f], 0,
+                                     error);
+            continue;
+        }
+        const struct ArrowArrayView *list = contents->view.children[f],
+                                    *entries = list->children[0];
+        struct ArrowArray *out_list = out->array.children[f], *out_entries = out_list->children[0];
+        const struct ArrowSchema *out_entry = out->schema.children[f]->children[0];
+        for (int64_t row = ArrowArrayViewListChildOffset(list, 0);
+             !rc && row < ArrowArrayViewListChildOffset(list, 1); ++row) {
+            int target = !found && entry_path_is(entries->children[path_id], row, schema);
+            for (int64_t k = 0; !rc && k < entry_schema->n_children; ++k) {
+                if (k != field_id || !target) {
+                    rc = VgiArrayAppendValue(out_entries->children[k], out_entry->children[k],
+                                             entries->children[k], entry_schema->children[k], row,
+                                             error);
+                    continue;
+                }
+                const struct ArrowArrayView *items = entries->children[k];
+                struct ArrowArray *out_items = out_entries->children[k];
+                for (int64_t j = ArrowArrayViewListChildOffset(items, row);
+                     !rc && j < ArrowArrayViewListChildOffset(items, row + 1); ++j)
+                    rc = VgiArrayAppendValue(
+                        out_items->children[0], out_entry->children[k]->children[0],
+                        items->children[0], entry_schema->children[k]->children[0], j, error);
+                if (!rc) rc = ArrowArrayAppendBytes(out_items->children[0], record);
+                if (!rc) rc = ArrowArrayFinishElement(out_items);
+                found = 1;
+            }
+            if (!rc) rc = ArrowArrayFinishElement(out_entries);
+        }
+        if (!rc) rc = ArrowArrayFinishElement(out_list);
+    }
+    if (!rc) rc = ArrowArrayFinishElement(&out->array);
+    if (!rc) rc = VgiBatchFinish(out, error);
+    if (!rc && !found) rc = ENOENT;
+    if (rc) VgiBatchReset(out);
+    return rc;
 }
 int VgiCatalogContentsFunctions(const struct VgiBatch *contents, VgiCatalogFunctionVisitor visit,
                                 void *state, struct ArrowError *error) {

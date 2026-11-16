@@ -9,6 +9,7 @@
 #include "filter_internal.h"
 #include "vgi/context.h"
 #include "vgi/rpc.h"
+#include "vgi/statistics.h"
 
 struct Predicate {
     char id[129];
@@ -868,7 +869,7 @@ int VgiFiltersParse(struct ArrowBufferView bytes, const struct ArrowSchema *sche
     if (!f) return ENOMEM;
     int rc = ArrowSchemaDeepCopy(schema, &f->schema);
     if (!rc && bytes.size_bytes) rc = document_load(f, bytes, "snapshot", error);
-    const struct ArrowArrayView *joins = VgiBatchGet(init, "join_keys");
+    const struct ArrowArrayView *joins = init ? VgiBatchGet(init, "join_keys") : NULL;
     if (!rc && joins && !ArrowArrayViewIsNull(joins, 0)) {
         int64_t start = ArrowArrayViewListChildOffset(joins, 0),
                 end = ArrowArrayViewListChildOffset(joins, 1);
@@ -1470,4 +1471,195 @@ int VgiFiltersColumnBounds(const struct VgiFilters *f, const char *name,
         }
     }
     return 0;
+}
+
+/* ---- Protocol 3.2 scan planning ------------------------------------------ */
+
+int VgiScanPlanningFiltersParse(const struct VgiBatch *request, const struct ArrowSchema *columns,
+                                struct VgiFilters **out, struct ArrowError *error) {
+    if (!request || !columns || !out) return EINVAL;
+    *out = NULL;
+    if (VgiBatchIsNull(request, "pushdown_filters")) return 0;
+    struct ArrowBufferView bytes = VgiBatchBytes(request, "pushdown_filters");
+    if (!bytes.size_bytes) return 0;
+    return VgiFiltersParse(bytes, columns, NULL, out, error);
+}
+static const struct VgiColumnStatistics *statistic_for(struct json_object *node,
+                                                       const struct VgiColumnStatistics *stats,
+                                                       size_t count) {
+    if (strcmp(str(node, "node"), "column_ref")) return NULL;
+    const char *name = str(node, "column_name");
+    for (size_t i = 0; i < count; ++i)
+        if (stats[i].name && !strcmp(stats[i].name, name)) return &stats[i];
+    return NULL;
+}
+/* Days since the epoch of an ISO "YYYY-MM-DD" date; nonzero when it is not one. */
+static int iso_date_days(struct ArrowStringView text, int64_t *days) {
+    if (text.size_bytes != 10 || text.data[4] != '-' || text.data[7] != '-') return EINVAL;
+    int64_t parts[3] = {0};
+    const int starts[] = {0, 5, 8}, lengths[] = {4, 2, 2};
+    for (int p = 0; p < 3; ++p)
+        for (int i = 0; i < lengths[p]; ++i) {
+            char c = text.data[starts[p] + i];
+            if (c < '0' || c > '9') return EINVAL;
+            parts[p] = parts[p] * 10 + (c - '0');
+        }
+    int64_t y = parts[0], m = parts[1], d = parts[2];
+    if (m < 1 || m > 12 || d < 1 || d > 31) return EINVAL;
+    /* Howard Hinnant's days_from_civil. */
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400, yoe = y - era * 400,
+            doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1,
+            doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    *days = era * 146097 + doe - 719468;
+    return 0;
+}
+/* Order a predicate literal against a statistics bound: *cmp is the sign of
+ * value - bound. Nonzero when the two are not comparable. */
+static int bound_compare(const struct Value *value, const struct VgiStatValue *bound, int *cmp) {
+    const char *format = value->schema ? value->schema->format : "";
+    switch (bound->kind) {
+        case VGI_STAT_INT64:
+            if (value->integer_kind == 1) {
+                *cmp = (value->integer > bound->integer) - (value->integer < bound->integer);
+                return 0;
+            }
+            if (value->integer_kind == 2) {
+                *cmp = bound->integer < 0 || value->unsigned_integer > (uint64_t)bound->integer ? 1
+                       : value->unsigned_integer < (uint64_t)bound->integer                     ? -1
+                                                                                                : 0;
+                return 0;
+            }
+            if (value->view && VgiValueIsNumber(value->view) && !isnan(value->number)) {
+                long double b = (long double)bound->integer;
+                *cmp = (value->number > b) - (value->number < b);
+                return 0;
+            }
+            return EINVAL;
+        case VGI_STAT_DOUBLE:
+            if (isnan(bound->real) || isnan(value->number)) return EINVAL;
+            if (value->integer_kind || (value->view && VgiValueIsNumber(value->view))) {
+                long double b = bound->real;
+                *cmp = (value->number > b) - (value->number < b);
+                return 0;
+            }
+            return EINVAL;
+        case VGI_STAT_STRING:
+        case VGI_STAT_BINARY:
+            if (!strcmp(format, "tdD") && value->integer_kind == 1) {
+                /* A DATE column's bound may be its ISO text, as the engine casts it. */
+                int64_t days;
+                if (iso_date_days(bound->bytes, &days)) return EINVAL;
+                *cmp = (value->integer > days) - (value->integer < days);
+                return 0;
+            }
+            if (value->string && bound->bytes.data) {
+                int64_t n = value->text.size_bytes < bound->bytes.size_bytes
+                                ? value->text.size_bytes
+                                : bound->bytes.size_bytes;
+                int c = memcmp(value->text.data, bound->bytes.data, (size_t)n);
+                *cmp = c ? (c > 0) - (c < 0)
+                         : (value->text.size_bytes > bound->bytes.size_bytes) -
+                               (value->text.size_bytes < bound->bytes.size_bytes);
+                return 0;
+            }
+            return EINVAL;
+    }
+    return EINVAL;
+}
+/* Whether value can lie within [min, max]; unknown bounds and incomparable
+ * values may. */
+static int within(const struct Value *value, const struct VgiColumnStatistics *stat) {
+    int cmp;
+    if (stat->min.present && !bound_compare(value, &stat->min, &cmp) && cmp < 0) return 0;
+    if (stat->max.present && !bound_compare(value, &stat->max, &cmp) && cmp > 0) return 0;
+    return 1;
+}
+static int may_match_node(const struct VgiFilters *f, struct json_object *node,
+                          const struct VgiColumnStatistics *stats, size_t count, int depth) {
+    if (!node || depth > 64) return 1;
+    const char *kind = str(node, "node");
+    if (!strcmp(kind, "and") || !strcmp(kind, "or")) {
+        int and = !strcmp(kind, "and");
+        struct json_object *children = get(node, "children");
+        if (!json_object_is_type(children, json_type_array)) return 1;
+        for (size_t i = 0; i < json_object_array_length(children); ++i) {
+            int match =
+                may_match_node(f, json_object_array_get_idx(children, i), stats, count, depth + 1);
+            if (and && !match) return 0;
+            if (!and && match) return 1;
+        }
+        return and;
+    }
+    if (!strcmp(kind, "is_null")) {
+        const struct VgiColumnStatistics *stat =
+            statistic_for(get(node, "expression"), stats, count);
+        if (!stat) return 1;
+        return json_object_get_boolean(get(node, "negated")) ? stat->has_not_null : stat->has_null;
+    }
+    if (!strcmp(kind, "in")) {
+        const struct VgiColumnStatistics *stat =
+            statistic_for(get(node, "expression"), stats, count);
+        if (!stat || json_object_get_boolean(get(node, "negated"))) return 1;
+        if (!stat->has_not_null) return 0;
+        const struct ArrowArrayView *view;
+        const struct ArrowSchema *schema;
+        int64_t start, end;
+        if (set_values(f, get(node, "set"), &view, &schema, &start, &end)) return 1;
+        for (int64_t i = start; i < end; ++i) {
+            struct Value value = {0};
+            if (from_array(view, schema, i, &value)) return 1;
+            if (!value.null && within(&value, stat)) return 1;
+        }
+        return 0;
+    }
+    if (!strcmp(kind, "comparison")) {
+        struct json_object *left = get(node, "left"), *right = get(node, "right");
+        const char *op = str(node, "op");
+        const struct VgiColumnStatistics *stat = statistic_for(left, stats, count);
+        struct json_object *literal = right;
+        if (!stat) {
+            stat = statistic_for(right, stats, count);
+            literal = left;
+            /* Normalise "literal op column" to "column op' literal". */
+            op = !strcmp(op, "lt")   ? "gt"
+                 : !strcmp(op, "le") ? "ge"
+                 : !strcmp(op, "gt") ? "lt"
+                 : !strcmp(op, "ge") ? "le"
+                                     : op;
+        }
+        if (!stat || strcmp(str(literal, "node"), "literal")) return 1;
+        int eq = !strcmp(op, "eq"), ne = !strcmp(op, "ne"), lt = !strcmp(op, "lt"),
+            le = !strcmp(op, "le"), gt = !strcmp(op, "gt"), ge = !strcmp(op, "ge");
+        if (!(eq || ne || lt || le || gt || ge)) return 1;
+        /* An entirely NULL column satisfies no comparison. */
+        if (!stat->has_not_null) return 0;
+        struct Value value = {0};
+        if (evaluate(f, literal, NULL, 0, depth + 1, &value) || value.null) return 1;
+        int cmp;
+        if (eq) return within(&value, stat);
+        if (ne)
+            return !(stat->min.present && stat->max.present &&
+                     !bound_compare(&value, &stat->min, &cmp) && cmp == 0 &&
+                     !bound_compare(&value, &stat->max, &cmp) && cmp == 0);
+        if (gt || ge) {
+            /* Some value <= max must exceed (or reach) the literal. */
+            if (!stat->max.present || bound_compare(&value, &stat->max, &cmp)) return 1;
+            return gt ? cmp < 0 : cmp <= 0;
+        }
+        if (!stat->min.present || bound_compare(&value, &stat->min, &cmp)) return 1;
+        return lt ? cmp > 0 : cmp >= 0;
+    }
+    return 1;
+}
+int VgiFiltersMayMatch(const struct VgiFilters *f, const struct VgiColumnStatistics *stats,
+                       size_t count) {
+    if (!f || (!stats && count)) return 1;
+    for (size_t i = 0; i < f->n_items; ++i) {
+        if (!f->items[i].node) continue;
+        struct VgiFilters context = predicate_context(f, &f->items[i]);
+        if (!may_match_node(&context, get(f->items[i].node, "expression"), stats, count, 0))
+            return 0;
+    }
+    return 1;
 }

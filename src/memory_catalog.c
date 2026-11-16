@@ -8,6 +8,7 @@
 
 #include "catalog_internal.h"
 #include "memory_catalog_internal.h"
+#include "vgi/catalog.h"
 #include "vgi/storage.h"
 struct Memory {
     struct VgiBatch info, attach, initial;
@@ -452,6 +453,9 @@ static int mutate(struct Snapshot *s, const char *method, const struct VgiBatch 
         /* Omitted or null request fields take the record's default. */
         if (VgiBatchGet(p, field) && !VgiBatchIsNull(p, field))
             rc = copy_field(object, field, p, field, &call->error);
+        /* A metadata table has no scan to plan with the query's filters. */
+        else if (!view && !strcmp(field, "scan_planning"))
+            rc = VgiBatchSetString(object, field, VGI_SCAN_PLANNING_BIND);
     }
     if (!rc) rc = VgiBatchFinishRow(object, &call->error);
     *changed = !rc;
@@ -558,7 +562,10 @@ int VgiMemoryDispatch(struct VgiMemoryService *service, struct VgiCatalogService
         rc = VgiStorageClear(store, cookie, &call->error);
         goto done;
     }
-    if (!rc && call->method->kind == VGI_METHOD_VOID && !strstr(method, "transaction_")) {
+    /* catalog_table_create answers whether it created the table (protocol 3.3). */
+    int table_create = !strcmp(method, "catalog_table_create");
+    if (!rc && (call->method->kind == VGI_METHOD_VOID || table_create) &&
+        !strstr(method, "transaction_")) {
         rc = VgiStorageBegin(store, &call->error);
         transaction = !rc;
     }
@@ -584,6 +591,15 @@ int VgiMemoryDispatch(struct VgiMemoryService *service, struct VgiCatalogService
         if (!rc) rc = VgiStorageCommit(store, &call->error);
         if (rc) VgiStorageRollback(store);
         transaction = 0;
+        /* Only IGNORE on an existing table leaves the snapshot unchanged:
+         * that call did not create it. REPLACE creates the new table. */
+        if (!rc && table_create) {
+            VgiBatchReset(&result);
+            rc = VgiBatchInitNamed(&result, "CatalogTableCreateResult", &call->error);
+            if (!rc) rc = VgiBatchSetInt(&result, "created", changed);
+            if (!rc) rc = VgiBatchFinishRow(&result, &call->error);
+            if (!rc) rc = VgiRpcReplyPayload(call, reply, &result);
+        }
         goto done;
     }
     if (!rc && !strcmp(method, "catalog_transaction_begin")) {

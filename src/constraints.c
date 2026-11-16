@@ -13,6 +13,7 @@
 
 #include "constraints_internal.h"
 #include "vgi/batch.h"
+#include "vgi/catalog.h"
 #include "vgi_rpc/stream.h"
 
 #define MAX_RECORD_BYTES (8 * 1024 * 1024)
@@ -1373,6 +1374,27 @@ static int table_read(struct ArrowBufferView bytes, struct Table *t, struct Arro
     }
     return rc;
 }
+/* Protocol 3.2: scan_planning is "bind" or "filtered", and a filtered table
+ * resolves its scan per query, so it must not inline scan_function. */
+int VgiTableInfoCheckScanPlanning(const struct VgiBatch *info, const char *table,
+                                  struct ArrowError *error) {
+    const struct ArrowArrayView *mode = VgiBatchGet(info, "scan_planning");
+    if (!mode) return 0;
+    struct ArrowStringView value = VgiValueString(mode, 0);
+    if (!value.data) return failf(error, "Table '%s': scan_planning is null", table);
+    if (value.size_bytes == 4 && !memcmp(value.data, VGI_SCAN_PLANNING_BIND, 4)) return 0;
+    if (value.size_bytes != 8 || memcmp(value.data, VGI_SCAN_PLANNING_FILTERED, 8))
+        return failf(error, "Table '%s': unknown scan_planning '%.*s' (expected '%s' or '%s')",
+                     table, (int)value.size_bytes, value.data, VGI_SCAN_PLANNING_BIND,
+                     VGI_SCAN_PLANNING_FILTERED);
+    const struct ArrowArrayView *scan = VgiBatchGet(info, "scan_function");
+    if (scan && !ArrowArrayViewIsNull(scan, 0))
+        return failf(error,
+                     "Table '%s': scan_planning='filtered' cannot be combined with an inlined "
+                     "scan_function; answer catalog_table_scan_branches_get instead",
+                     table);
+    return 0;
+}
 int VgiTableInfoServe(struct ArrowBufferView bytes, struct ArrowBuffer *out, int *has_records,
                       int *has_check, struct ArrowError *error) {
     if (!out || out->size_bytes) return EINVAL;
@@ -1395,14 +1417,22 @@ int VgiTableInfoServe(struct ArrowBufferView bytes, struct ArrowBuffer *out, int
     for (int64_t i = 0; !rc && i < target.schema.n_children; ++i) {
         const char *field = target.schema.children[i]->name;
         int64_t source = VgiFieldIndex(&t.info.schema, field);
+        /* Fields a descriptor lacks (captured before they existed) take their
+         * defaults. scan_planning (protocol 3.2) defaults to "bind", also when
+         * a builder left it empty. */
         if (!strcmp(field, "columns"))
             rc = set_buffer(&target, field, &columns);
+        else if (!strcmp(field, "scan_planning") &&
+                 (source < 0 || !VgiValueString(t.info.view.children[source], 0).size_bytes))
+            rc = VgiBatchSetString(&target, field, VGI_SCAN_PLANNING_BIND);
         else if (source >= 0)
             rc = VgiArrayAppendValue(target.array.children[i], target.schema.children[i],
                                      t.info.view.children[source], t.info.schema.children[source],
                                      0, error);
     }
-    if (!rc) rc = encode_batch(&target, out, error);
+    if (!rc) rc = VgiBatchFinishRow(&target, error);
+    if (!rc) rc = VgiTableInfoCheckScanPlanning(&target, t.name, error);
+    if (!rc) rc = VgiIpcWriteBatch(&target.schema, &target.array, NULL, out, error);
     if (!rc && has_records) *has_records = t.record_count > 0;
     if (!rc && has_check) {
         *has_check = 0;

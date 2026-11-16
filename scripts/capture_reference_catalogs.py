@@ -160,7 +160,6 @@ def main():
                 }
                 for method in (
                     "catalog_table_get",
-                    "catalog_table_scan_function_get",
                     "catalog_table_scan_branches_get",
                     "catalog_table_column_statistics_get",
                 ):
@@ -192,7 +191,6 @@ def main():
                 for version in range(1, version_count + 1):
                     for method in (
                         "catalog_table_get",
-                        "catalog_table_scan_function_get",
                         "catalog_table_scan_branches_get",
                     ):
                         try:

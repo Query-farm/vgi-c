@@ -187,11 +187,89 @@ static void check_not_a_number(enum Kind kind) {
     }
     ArrowSchemaRelease(&column);
 }
+static struct VgiColumnStatistics int_range(int has_min, int64_t min, int has_max, int64_t max) {
+    struct VgiColumnStatistics stat = {0};
+    stat.name = "x";
+    stat.min = (struct VgiStatValue){VGI_STAT_INT64, has_min, min, 0, {0}};
+    stat.max = (struct VgiStatValue){VGI_STAT_INT64, has_max, max, 0, {0}};
+    stat.has_null = 0;
+    stat.has_not_null = 1;
+    stat.distinct_count = stat.max_string_length = -1;
+    stat.contains_unicode = -1;
+    return stat;
+}
+/* Protocol 3.2 scan planning: a candidate is pruned only when the predicates
+ * provably exclude every row its statistics describe. */
+static void check_may_match(void) {
+    const char *ops[] = {"eq", "ne", "lt", "le", "gt", "ge"};
+    /* x OP 10 against x in [lo, hi]; expected for [0,5], [10,10], [11,20]. */
+    const int expected[][3] = {{0, 1, 0}, {1, 0, 1}, {1, 0, 0}, {1, 1, 0}, {0, 0, 1}, {0, 1, 1}};
+    const int64_t ranges[][2] = {{0, 5}, {10, 10}, {11, 20}};
+    for (int op = 0; op < 6; ++op) {
+        char json[512];
+        snprintf(json, sizeof(json),
+                 START "{\"node\":\"comparison\",\"op\":\"%s\",\"left\":" COL ",\"right\":" LIT
+                       "}" END,
+                 ops[op]);
+        struct VgiFilters *f = NULL;
+        CHECK(!parse(json, 10, &f));
+        for (int r = 0; r < 3; ++r) {
+            struct VgiColumnStatistics stat = int_range(1, ranges[r][0], 1, ranges[r][1]);
+            if (VgiFiltersMayMatch(f, &stat, 1) != expected[op][r]) {
+                fprintf(stderr, "x %s 10 over [%lld, %lld]\n", ops[op], (long long)ranges[r][0],
+                        (long long)ranges[r][1]);
+                CHECK(0);
+            }
+        }
+        /* Unknown bounds, other columns and an absent column may match. */
+        struct VgiColumnStatistics open = int_range(0, 0, 0, 0), other = int_range(1, 0, 1, 0);
+        other.name = "y";
+        CHECK(VgiFiltersMayMatch(f, &open, 1));
+        CHECK(VgiFiltersMayMatch(f, &other, 1));
+        CHECK(VgiFiltersMayMatch(f, NULL, 0));
+        /* An entirely NULL column satisfies no comparison. */
+        struct VgiColumnStatistics nulls = int_range(0, 0, 0, 0);
+        nulls.has_null = 1;
+        nulls.has_not_null = 0;
+        CHECK(!VgiFiltersMayMatch(f, &nulls, 1));
+        VgiFiltersFree(f);
+    }
+    /* Literal on the left: 10 < x is x > 10. */
+    struct VgiFilters *f = NULL;
+    CHECK(!parse(START "{\"node\":\"comparison\",\"op\":\"lt\",\"left\":" LIT ",\"right\":" COL
+                       "}" END,
+                 10, &f));
+    struct VgiColumnStatistics low = int_range(1, 0, 1, 10), high = int_range(1, 0, 1, 11);
+    CHECK(!VgiFiltersMayMatch(f, &low, 1));
+    CHECK(VgiFiltersMayMatch(f, &high, 1));
+    VgiFiltersFree(f);
+    /* OR keeps a candidate when either side may match; AND needs both. */
+    CHECK(!parse(START "{\"node\":\"or\",\"children\":[{\"node\":\"comparison\",\"op\":\"lt\","
+                       "\"left\":" COL ",\"right\":" LIT
+                       "},{\"node\":\"is_null\",\"expression\":" COL ",\"negated\":false}]}" END,
+                 10, &f));
+    struct VgiColumnStatistics big = int_range(1, 20, 1, 30);
+    CHECK(!VgiFiltersMayMatch(f, &big, 1));
+    big.has_null = 1;
+    CHECK(VgiFiltersMayMatch(f, &big, 1));
+    VgiFiltersFree(f);
+    CHECK(!parse(START "{\"node\":\"and\",\"children\":[{\"node\":\"comparison\",\"op\":\"ge\","
+                       "\"left\":" COL ",\"right\":" LIT
+                       "},{\"node\":\"is_null\",\"expression\":" COL ",\"negated\":true}]}" END,
+                 10, &f));
+    struct VgiColumnStatistics small = int_range(1, 0, 1, 9), mid = int_range(1, 5, 1, 15);
+    CHECK(!VgiFiltersMayMatch(f, &small, 1));
+    CHECK(VgiFiltersMayMatch(f, &mid, 1));
+    VgiFiltersFree(f);
+    /* NULL filters (no predicates were sent) keep everything. */
+    CHECK(VgiFiltersMayMatch(NULL, &small, 1));
+}
 int main(void) {
     check_not_a_number(MAP);
     check_not_a_number(ARRAY);
     check_not_a_number(INTERVAL);
     check_not_a_number(INTERVAL_MONTHS);
+    check_may_match();
     struct VgiFilters *f = NULL;
     int64_t n = 0;
     CHECK(!parse(START "{\"node\":\"comparison\",\"op\":\"eq\",\"left\":" COL ",\"right\":" LIT
@@ -229,6 +307,8 @@ int main(void) {
                  1, &f));
     CHECK(apply(f, INT64_MAX, 0, &n) != 0);
     VgiFiltersFree(f);
-    puts("Filter validation, exact integers, cast bounds, overflow, and non-number columns passed");
+    puts(
+        "Filter validation, exact integers, cast bounds, overflow, non-number columns and "
+        "scan-planning pruning passed");
     return 0;
 }

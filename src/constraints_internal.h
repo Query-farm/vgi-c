@@ -1,5 +1,6 @@
 #ifndef VGI_CONSTRAINTS_INTERNAL_H
 #define VGI_CONSTRAINTS_INTERNAL_H
+#include "vgi/batch.h"
 #include "vgi/constraints.h"
 
 /* Check one TableInfo record against the ATTACH contract and re-encode it as
@@ -9,6 +10,10 @@
  * initialized and empty; it stays empty on failure. */
 int VgiTableInfoServe(struct ArrowBufferView table_info, struct ArrowBuffer *out, int *has_records,
                       int *has_check, struct ArrowError *error);
+/* Refuse a TableInfo whose scan_planning is not "bind" or "filtered", or that
+ * is "filtered" and inlines scan_function (protocol 3.2). */
+int VgiTableInfoCheckScanPlanning(const struct VgiBatch *table_info, const char *table,
+                                  struct ArrowError *error);
 /* Check every FOREIGN_KEY record among tables (TableInfo records served by one
  * catalog snapshot) against its target: a declared table of the same schema
  * whose PRIMARY_KEY or UNIQUE record has the referenced id and columns. */

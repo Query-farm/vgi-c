@@ -286,10 +286,63 @@ static void check_contents_etag(void) {
     VgiWorkerFree(worker);
 }
 
+static int register_catalog_contents(struct VgiWorker *worker, const char *name,
+                                     const struct VgiBatch *contents) {
+    struct VgiBatch info = {0}, attach = {0};
+    CHECK(!VgiBatchInitNamed(&info, "CatalogInfo", &error));
+    CHECK(!VgiBatchSetString(&info, "name", name));
+    CHECK(!VgiBatchFinishRow(&info, &error));
+    CHECK(!VgiBatchInitNamed(&attach, "CatalogAttachResult", &error));
+    CHECK(!VgiBatchFinishRow(&attach, &error));
+    int rc = VgiWorkerRegisterCatalog(worker, &info, &attach, contents, NULL, &error);
+    VgiBatchReset(&info);
+    VgiBatchReset(&attach);
+    return rc;
+}
+/* Protocol 3.3 FunctionInfo.visibility: null, public or table_only, from the
+ * registered FunctionInfo or a declarative catalog's entry; nothing else. */
+static void check_visibility(void) {
+    const char *values[] = {NULL, VGI_FUNCTION_VISIBILITY_PUBLIC,
+                            VGI_FUNCTION_VISIBILITY_TABLE_ONLY, "private", ""};
+    for (int i = 0; i < 5; ++i) {
+        struct VgiWorker *worker = VgiWorkerNew("cat");
+        CHECK(worker);
+        struct VgiFunction fn;
+        function_init(&fn, "scan", VGI_TABLE, 0);
+        if (values[i]) CHECK(!VgiBatchSetString(&fn.info, "visibility", values[i]));
+        int rc = VgiWorkerRegisterFunction(worker, &fn, &error);
+        if (i < 3)
+            CHECK(rc == 0);
+        else {
+            CHECK(rc == EINVAL);
+            CHECK(strstr(error.message, "visibility"));
+        }
+        VgiFunctionReset(&fn);
+
+        struct VgiBatch contents = {0};
+        struct ArrowBuffer entry;
+        function_init(&fn, "listed", VGI_TABLE, 0);
+        if (values[i]) CHECK(!VgiBatchSetString(&fn.info, "visibility", values[i]));
+        CHECK(!VgiBatchFinishRow(&fn.info, &error));
+        ArrowBufferInit(&entry);
+        CHECK(!VgiIpcWriteBatch(&fn.info.schema, &fn.info.array, NULL, &entry, &error));
+        VgiFunctionReset(&fn);
+        contents_init(&contents, &entry, NULL);
+        rc = register_catalog_contents(worker, "listed_cat", &contents);
+        CHECK(i < 3 ? rc == 0 : rc == EINVAL);
+        VgiBatchReset(&contents);
+        ArrowBufferReset(&entry);
+        VgiWorkerFree(worker);
+    }
+}
+
 int main(void) {
     check_parameter_default_values();
     check_shared_connection_refusal();
     check_contents_etag();
-    puts("FunctionInfo binary fields, max_workers = 1 refusals, and contents etag passed");
+    check_visibility();
+    puts(
+        "FunctionInfo binary fields, max_workers = 1 refusals, contents etag and "
+        "visibility passed");
     return 0;
 }

@@ -5,6 +5,21 @@
 extern "C" {
 #endif
 struct VgiWorker;
+/* TableInfo.scan_planning (protocol 3.2). "bind" resolves the scan redirect at
+ * bind time; "filtered" defers catalog_table_scan_branches_get until the
+ * client has collected the query's predicates, which arrive as
+ * pushdown_filters (see VgiScanPlanningFiltersParse). A filtered table leaves
+ * scan_function null; a catalog refuses one that inlines it. */
+#define VGI_SCAN_PLANNING_BIND "bind"
+#define VGI_SCAN_PLANNING_FILTERED "filtered"
+/* FunctionInfo.visibility (protocol 3.3); null means public. A table_only
+ * function is listed so the client knows its capabilities, but is not callable
+ * from SQL. A worker lists every function a table names (its scan, insert,
+ * update and delete functions): write functions are always table_only, a scan
+ * is table_only unless the author also exposes it as an ordinary function.
+ * Registration refuses any other value. */
+#define VGI_FUNCTION_VISIBILITY_PUBLIC "public"
+#define VGI_FUNCTION_VISIBILITY_TABLE_ONLY "table_only"
 /* An application may handle dynamic catalog operations before the declarative
  * catalog. Set handled=0 to delegate; the callback and state must outlive worker. */
 typedef int (*VgiCatalogHandler)(void *state, struct VgiRpcCall *call, struct VgiRpcReply *reply,
