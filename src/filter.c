@@ -1197,6 +1197,83 @@ int VgiFiltersFormat(const struct VgiFilters *f, int repr, struct ArrowBuffer *o
     if (rc) ArrowErrorSet(error, "Cannot format filter expression");
     return rc;
 }
+/* One predicate in vgi-python's fixture description form (_describe_filter). */
+static int describe_node(struct json_object *node, struct ArrowBuffer *out, int depth) {
+    if (!node || depth > 64) return EINVAL;
+    const char *kind = str(node, "node");
+    if (!strcmp(kind, "and") || !strcmp(kind, "or")) {
+        NANOARROW_RETURN_NOT_OK(append_text(out, strcmp(kind, "and") ? "Or(" : "And("));
+        struct json_object *children = get(node, "children");
+        if (!json_object_is_type(children, json_type_array)) return EINVAL;
+        for (size_t i = 0; i < json_object_array_length(children); ++i) {
+            if (i) NANOARROW_RETURN_NOT_OK(append_text(out, ", "));
+            NANOARROW_RETURN_NOT_OK(
+                describe_node(json_object_array_get_idx(children, i), out, depth + 1));
+        }
+        return append_text(out, ")");
+    }
+    if (!strcmp(kind, "comparison")) {
+        struct json_object *left = get(node, "left"), *right = get(node, "right");
+        const char *op = str(node, "op");
+        if (strcmp(str(left, "node"), "column_ref") && !strcmp(str(right, "node"), "column_ref")) {
+            left = right;
+            op = !strcmp(op, "lt")   ? "gt"
+                 : !strcmp(op, "le") ? "ge"
+                 : !strcmp(op, "gt") ? "lt"
+                 : !strcmp(op, "ge") ? "le"
+                                     : op;
+        }
+        NANOARROW_RETURN_NOT_OK(append_text(out, str(left, "column_name")));
+        NANOARROW_RETURN_NOT_OK(append_text(out, " "));
+        char upper[32];
+        size_t n = 0;
+        for (; op[n] && n + 1 < sizeof(upper); ++n)
+            upper[n] = (char)(op[n] >= 'a' && op[n] <= 'z' ? op[n] - 32 : op[n]);
+        upper[n] = 0;
+        return append_text(out, upper);
+    }
+    struct json_object *operand = get(node, "expression");
+    const char *column = operand ? str(operand, "column_name") : "";
+    NANOARROW_RETURN_NOT_OK(append_text(out, column));
+    if (!strcmp(kind, "is_null"))
+        return append_text(
+            out, json_object_get_boolean(get(node, "negated")) ? " IsNotNull" : " IsNull");
+    if (!strcmp(kind, "in")) return append_text(out, " In");
+    return append_text(out, " Expression");
+}
+static int compare_strings(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+int VgiFiltersDescribe(const struct VgiFilters *f, struct ArrowBuffer *out,
+                       struct ArrowError *error) {
+    size_t count = f ? f->n_items : 0, n = 0;
+    char **lines = count ? calloc(count, sizeof(*lines)) : NULL;
+    int rc = count && !lines ? ENOMEM : 0;
+    for (size_t i = 0; !rc && i < count; ++i) {
+        if (!f->items[i].node) continue;
+        struct ArrowBuffer line;
+        ArrowBufferInit(&line);
+        rc = describe_node(get(f->items[i].node, "expression"), &line, 0);
+        if (!rc) rc = ArrowBufferAppend(&line, "", 1);
+        if (!rc) {
+            lines[n++] = (char *)line.data;
+            line.data = NULL;
+        }
+        ArrowBufferReset(&line);
+    }
+    if (!rc) qsort(lines, n, sizeof(*lines), compare_strings);
+    struct json_object *array = !rc ? json_object_new_array() : NULL;
+    for (size_t i = 0; !rc && i < n; ++i)
+        json_object_array_add(array, json_object_new_string(lines[i]));
+    if (array) {
+        rc = append_text(out, json_object_to_json_string_ext(array, JSON_C_TO_STRING_PLAIN));
+        json_object_put(array);
+    }
+    for (size_t i = 0; i < n; ++i) free(lines[i]);
+    free(lines);
+    if (rc) ArrowErrorSet(error, "Cannot describe filter expression");
+    return rc;
+}
 static int mentions(struct json_object *node, const char *name, int depth) {
     if (!node || depth > 64) return 0;
     if (json_object_is_type(node, json_type_object)) {

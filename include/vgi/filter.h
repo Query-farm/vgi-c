@@ -41,6 +41,12 @@ int VgiFiltersApply(const struct VgiFilters *filters, const struct VgiBatch *inp
 /* Append SQL-style diagnostic text, or the structural representation when repr is nonzero. */
 int VgiFiltersFormat(const struct VgiFilters *, int repr, struct ArrowBuffer *,
                      struct ArrowError *);
+/* Append a JSON array (sorted) with one stable line per pushed predicate:
+ * "col OP" for a comparison (OP is EQ, NE, LT, LE, GT, GE, ...; a literal-first
+ * comparison is normalised to column-first), "And(...)" / "Or(...)" for
+ * conjunctions, "col IsNull" / "col IsNotNull" / "col In" otherwise. Matches
+ * vgi-python's fixture description, so tests can assert what reached the worker. */
+int VgiFiltersDescribe(const struct VgiFilters *, struct ArrowBuffer *, struct ArrowError *);
 int VgiFiltersHasColumn(const struct VgiFilters *, const char *name);
 int VgiFiltersColumns(const struct VgiFilters *, struct VgiBatch *, struct ArrowError *);
 /* ENODATA means no enumerable constraint. A successful zero-row result is an empty set. */

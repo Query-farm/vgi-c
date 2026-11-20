@@ -15,7 +15,7 @@ The reusable transport, IPC, reflection, identity, and native client layer is
 library and owns VGI-specific worker behavior. See [the documentation](docs/index.md)
 for the split and build options.
 
-The SDK speaks VGI protocol `vgi.v3` / 3.3.0, with schemas generated from
+The SDK speaks VGI protocol `vgi.v3` / 3.4.0, with schemas generated from
 `vgi-python`. It implements scalar and table functions, streaming exchanges,
 buffered functions, grouped/window/streaming aggregates, immutable and mutable
 catalogs, version negotiation and time travel, attach options, settings and
@@ -164,16 +164,17 @@ The SHM lane exercises capability negotiation, segment reuse across unary calls,
 COPY TO, buffered functions, and retained cached results. Inline catalog/bind
 calls can share the same pooled worker connection.
 
-Validated on Linux aarch64 for vgi.v3 / 3.3.0 with `ci/run-integration.sh`
-(suite and native Haybarn runner both at Query-farm/vgi `b559975`, with
+Validated on Linux aarch64 for vgi.v3 / 3.4.0 with `ci/run-integration.sh`
+(suite and native Haybarn runner both at Query-farm/vgi `865022e`, branch
+`protocol-3.4`, with
 `VGI_ENGINE_CORRELATED_NAMED_ARGS=1` and
 `VGI_ENGINE_DELETE_RETURNING_VIRTUAL_COLUMNS=1` from its `make engine_test_env`):
 
 | Check | Result |
 | --- | --- |
-| Subprocess SQL suite (420 staged) | 352 executed, all passed; 68 fixture-dependent skips |
-| Launcher SQL suite (420 staged) | 353 executed, all passed; 67 fixture-dependent skips |
-| HTTP SQL suite (417 staged) | 347 executed, all passed; 70 fixture-dependent skips |
+| Subprocess SQL suite (422 staged) | 354 executed, all passed; 68 fixture-dependent skips |
+| Launcher SQL suite (422 staged) | 355 executed, all passed; 67 fixture-dependent skips |
+| HTTP SQL suite (419 staged) | 349 executed, all passed; 70 fixture-dependent skips |
 | Protected bearer lane (HTTP) | 2 passed |
 | Native C tests | 8 groups passed (also under `-DVGI_SANITIZE=ON` with Clang) |
 | Schema and IPC interoperability (vgi-python v0.52.0) | 263 exact schemas, 84 method signatures, 265 round trips, 9 malformed streams |
@@ -274,7 +275,17 @@ batch) are set by field name; the client prunes branches whose statistics or
 `branch_filter` contradict the query. Served tables default `scan_planning` to
 `"bind"`, and a table with another value, or a filtered table that inlines
 `scan_function`, is refused. `example-worker/scan_planning.c` implements the
-shared suite's `planned_days*` fixtures.
+shared suite's `planned_days*` and `planned_events` fixtures; the latter records
+each planning call's days and `VgiFiltersDescribe()` lines (one stable
+description per pushed predicate, as vgi-python's fixture writes them).
+
+Protocol 3.4 changes no VGI record (the protocol hash is unchanged from 3.3); it
+moves vgi-rpc to upload-URL protocol v2 (`VGI-Upload-URL-Support: 2`: sized,
+SHA-256-checked client uploads) and makes `vgi_rpc.location.sha256` mandatory on
+request pointers. Both live in vgi-rpc-c; a worker that configures external
+storage gets them from `VgiRpcServerSetExternal`, whose allocator now receives
+each upload's size and digest. The example worker configures no external
+storage, so it advertises no upload support.
 
 Protocol 3.3 function visibility: `FunctionInfo.visibility` is null (public),
 `VGI_FUNCTION_VISIBILITY_PUBLIC` or `VGI_FUNCTION_VISIBILITY_TABLE_ONLY`;

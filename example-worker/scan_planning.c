@@ -15,7 +15,13 @@
  * - data.planned_days_bf (bind): one branch per day whose branch_filter the
  *   client contradicts with the query's predicates.
  * - data.multi_branch_comma_filter (bind): a two-expression branch_filter,
- *   which a 3.2 client rejects. */
+ *   which a 3.2 client rejects.
+ * - data.planned_events (filtered): mixed-type columns (DATE, TIMESTAMPTZ,
+ *   VARCHAR, BIGINT, DOUBLE, BOOLEAN) over planned_events_<day>.parquet. The
+ *   worker prunes days on event_date and ts statistics and records every
+ *   planning call (planned days and the described filters, null when none
+ *   arrived) in planned_events_last_plan.json, for the shared suite's
+ *   catalog/scan_planning_predicates*.test. */
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,7 +37,15 @@
 #define DAY_COUNT 5
 static const char *const DAYS[DAY_COUNT] = {"2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04",
                                             "2026-10-05"};
-enum Planned { PLANNED_DAYS, PLANNED_DAYS_STATS, PLANNED_DAYS_BF, COMMA_FILTER, NOT_PLANNED };
+enum Planned {
+    PLANNED_DAYS,
+    PLANNED_DAYS_STATS,
+    PLANNED_DAYS_BF,
+    COMMA_FILTER,
+    PLANNED_EVENTS,
+    NOT_PLANNED
+};
+/* dated: 0 = n only, 1 = event_date + n, 2 = the planned_events columns. */
 static const struct {
     const char *name, *comment;
     int filtered, dated;
@@ -44,6 +58,9 @@ static const struct {
      "Protocol 3.2: pruning by branch_filter contradiction — scan_planning_branch_filter.test", 0,
      1},
     {"multi_branch_comma_filter", "Protocol 3.2: multi-expression branch_filter is rejected", 0, 0},
+    {"planned_events",
+     "Protocol 3.2: filtered planning, non-prunable predicates — scan_planning_predicates.test", 1,
+     2},
 };
 
 static int fail(struct ArrowError *error, const char *message) {
@@ -58,13 +75,35 @@ static int branch_path(char *out, size_t size, const char *name) {
     int written = snprintf(out, size, "%.*s/%s", (int)length, dir, name);
     return written < 0 || (size_t)written >= size ? ENAMETOOLONG : 0;
 }
-static int day_file(char *out, size_t size, const char *day) {
+static int day_file(char *out, size_t size, const char *prefix, const char *day) {
     char name[64];
-    snprintf(name, sizeof(name), "planned_days_%s.parquet", day);
+    snprintf(name, sizeof(name), "%s_%s.parquet", prefix, day);
     return branch_path(out, size, name);
+}
+/* planned_events: event_date DATE, ts TIMESTAMPTZ (us, UTC), series VARCHAR,
+ * ticker VARCHAR, n BIGINT, price DOUBLE, flag BOOLEAN. */
+static int event_columns(struct ArrowSchema *out) {
+    static const struct {
+        const char *name;
+        enum ArrowType type;
+    } FIELDS[] = {{"event_date", NANOARROW_TYPE_DATE32}, {"ts", NANOARROW_TYPE_TIMESTAMP},
+                  {"series", NANOARROW_TYPE_STRING},     {"ticker", NANOARROW_TYPE_STRING},
+                  {"n", NANOARROW_TYPE_INT64},           {"price", NANOARROW_TYPE_DOUBLE},
+                  {"flag", NANOARROW_TYPE_BOOL}};
+    ArrowSchemaInit(out);
+    int rc = ArrowSchemaSetTypeStruct(out, 7);
+    for (int i = 0; !rc && i < 7; ++i) {
+        rc = FIELDS[i].type == NANOARROW_TYPE_TIMESTAMP
+                 ? ArrowSchemaSetTypeDateTime(out->children[i], NANOARROW_TYPE_TIMESTAMP,
+                                              NANOARROW_TIME_UNIT_MICRO, "UTC")
+                 : ArrowSchemaSetType(out->children[i], FIELDS[i].type);
+        if (!rc) rc = ArrowSchemaSetName(out->children[i], FIELDS[i].name);
+    }
+    return rc;
 }
 /* The declared columns: event_date DATE, n BIGINT (n only for the comma table). */
 static int columns(struct ArrowSchema *out, int dated) {
+    if (dated == 2) return event_columns(out);
     ArrowSchemaInit(out);
     int rc = ArrowSchemaSetTypeStruct(out, dated ? 2 : 1);
     int n = dated ? 1 : 0;
@@ -285,6 +324,63 @@ static int append_branch(struct VgiBatch *result, const struct Branch *b,
  * predicates arrived. Only calls carrying predicates write it: filterless
  * fetches (vgi_table_branches() in concurrently running tests sharing the
  * directory) would otherwise overwrite it. */
+/* planned_events statistics: event_date is the day; ts spans 00:00-09:00 UTC. */
+static void event_statistics(const char *day, struct VgiColumnStatistics stats[2]) {
+    stats[0] = day_statistics(day);
+    struct VgiColumnStatistics ts = {0};
+    int y = 0, m = 0, d = 0;
+    sscanf(day, "%d-%d-%d", &y, &m, &d);
+    /* Howard Hinnant's days_from_civil. */
+    int64_t yy = y - (m <= 2), era = (yy >= 0 ? yy : yy - 399) / 400, yoe = yy - era * 400,
+            doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1,
+            doe = yoe * 365 + yoe / 4 - yoe / 100 + doy, days = era * 146097 + doe - 719468;
+    int64_t start = days * 86400 * INT64_C(1000000);
+    ts.name = "ts";
+    ts.min = (struct VgiStatValue){VGI_STAT_INT64, 1, start, 0, {0}};
+    ts.max = (struct VgiStatValue){VGI_STAT_INT64, 1, start + 9 * 3600 * INT64_C(1000000), 0, {0}};
+    ts.has_null = 0;
+    ts.has_not_null = 1;
+    ts.distinct_count = -1;
+    ts.max_string_length = -1;
+    ts.contains_unicode = -1;
+    stats[1] = ts;
+}
+static int write_atomically(const char *name, const char *text, struct ArrowError *error) {
+    char path[4096], temporary[4200];
+    if (branch_path(path, sizeof(path), name))
+        return fail(error, "VGI_TEST_BRANCH_DIR is too long");
+    snprintf(temporary, sizeof(temporary), "%s.%ld.tmp", path, (long)getpid());
+    FILE *file = fopen(temporary, "w");
+    int ok = file && fputs(text, file) >= 0;
+    if (file && fclose(file)) ok = 0;
+    if (!ok || rename(temporary, path)) {
+        remove(temporary);
+        ArrowErrorSet(error, "cannot write %s", name);
+        return EIO;
+    }
+    return 0;
+}
+/* Every planned_events planning call: {"days": [...], "filters": [...] | null}. */
+static int record_event_plan(const char *const *days, size_t count,
+                             const struct VgiFilters *filters, struct ArrowError *error) {
+    struct ArrowBuffer text;
+    ArrowBufferInit(&text);
+    const char *head = "{\"days\": [", *middle = "], \"filters\": ";
+    int rc = ArrowBufferAppend(&text, head, (int64_t)strlen(head));
+    for (size_t i = 0; !rc && i < count; ++i) {
+        char item[32];
+        snprintf(item, sizeof(item), "%s\"%s\"", i ? ", " : "", days[i]);
+        rc = ArrowBufferAppend(&text, item, (int64_t)strlen(item));
+    }
+    if (!rc) rc = ArrowBufferAppend(&text, middle, (int64_t)strlen(middle));
+    if (!rc)
+        rc = filters ? VgiFiltersDescribe(filters, &text, error)
+                     : ArrowBufferAppend(&text, "null", 4);
+    if (!rc) rc = ArrowBufferAppend(&text, "}", 2);
+    if (!rc) rc = write_atomically("planned_events_last_plan.json", (const char *)text.data, error);
+    ArrowBufferReset(&text);
+    return rc;
+}
 static int record_plan(const char *const *days, size_t count, struct ArrowError *error) {
     char path[4096], temporary[4200];
     int rc = branch_path(path, sizeof(path), "planned_days_last_plan.json");
@@ -313,8 +409,29 @@ int ExampleScanPlanningHandler(struct VgiRpcCall *call, struct VgiRpcReply *repl
     const char *kept[DAY_COUNT], *kept_files[DAY_COUNT];
     size_t count = 0;
     int rc = VgiBatchInitNamed(&result, "ScanBranchesResult", &call->error);
-    for (int i = 0; !rc && i < DAY_COUNT; ++i) rc = day_file(files[i], sizeof(files[i]), DAYS[i]);
-    if (!rc && table == PLANNED_DAYS) {
+    for (int i = 0; !rc && i < DAY_COUNT; ++i)
+        rc = day_file(files[i], sizeof(files[i]),
+                      table == PLANNED_EVENTS ? "planned_events" : "planned_days", DAYS[i]);
+    if (!rc && table == PLANNED_EVENTS) {
+        rc = columns(&declared, 2);
+        if (!rc)
+            rc = VgiScanPlanningFiltersParse(&call->request, &declared, &filters, &call->error);
+        for (int i = 0; !rc && i < DAY_COUNT; ++i) {
+            struct VgiColumnStatistics stats[2];
+            event_statistics(DAYS[i], stats);
+            if (!VgiFiltersMayMatch(filters, stats, 2)) continue;
+            kept[count] = DAYS[i];
+            kept_files[count++] = files[i];
+        }
+        if (!rc) rc = record_event_plan(kept, count, filters, &call->error);
+        if (!rc && count) {
+            struct Branch branch = {"read_parquet", {0}, NULL, NULL, 10 * (int64_t)count, NULL};
+            ArrowBufferInit(&branch.arguments);
+            rc = scan_arguments(kept_files, count, 1, 0, &branch.arguments, &call->error);
+            if (!rc) rc = append_branch(&result, &branch, &call->error);
+            ArrowBufferReset(&branch.arguments);
+        }
+    } else if (!rc && table == PLANNED_DAYS) {
         rc = columns(&declared, 1);
         if (!rc)
             rc = VgiScanPlanningFiltersParse(&call->request, &declared, &filters, &call->error);

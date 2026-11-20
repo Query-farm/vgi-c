@@ -65,8 +65,8 @@ COPY TO, and cached results retained across later requests.
 `ci/run-integration.sh` stages the pinned suite for one transport (stdio,
 launch or http), enforces an allowlist of fixture-dependent skip reasons and an
 executed-case floor, and is what CI runs with the native runner built at the
-pinned VGI commit. The vgi.v3 / 3.3.0 validation (Linux aarch64, suite and
-native runner at `b559975`) executed 352 subprocess, 353 launcher and 347 HTTP
+pinned VGI commit. The vgi.v3 / 3.4.0 validation (Linux aarch64, suite and
+native runner at `865022e`) executed 354 subprocess, 355 launcher and 349 HTTP
 cases with no failures, plus the 2-case bearer lane. A Haybarn runner needs the
 `VGI_ENGINE_*` variables from the vgi checkout's `make -s engine_test_env`
 exported, as CI's runner download does.
