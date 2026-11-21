@@ -17,6 +17,8 @@
 #define JWKS_REFRESH_MIN_INTERVAL_SECONDS 60.0
 #define JWKS_FETCH_TIMEOUT_SECONDS 10.0
 #define MIN_SIGNING_KEY_BYTES 32
+/* Request cap when VGI_RPC_MAX_REQUEST_BYTES is unset, as in vgi-python. */
+#define HOSTED_MAX_REQUEST_BYTES (32 * 1024 * 1024)
 
 int VgiHostedRefuse(struct ArrowError *error, const char *reason) {
     ArrowErrorSet(error, VGI_HOSTED_ENV "=1 (Orchard hosted mode): %s", reason);
@@ -196,5 +198,7 @@ int VgiHostedPrepare(const struct VgiHttpOptions *requested, struct VgiHttpOptio
     effective->auth_challenge = HOSTED_CHALLENGE;
     /* The only credential is a bearer Pass, so CORS can be open. */
     effective->cors_origin = "*";
+    /* At most this much of a body is buffered before the Pass check. */
+    if (!set("VGI_RPC_MAX_REQUEST_BYTES")) effective->max_request_bytes = HOSTED_MAX_REQUEST_BYTES;
     return 0;
 }

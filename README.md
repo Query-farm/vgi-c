@@ -377,7 +377,8 @@ valid one the answer is `401` with `WWW-Authenticate: Bearer
 error="invalid_token"` (no `resource_metadata`), `VGI-Auth-Reason:
 missing_credential|invalid_credential|expired_credential` and the capability
 headers. Authentication runs before the body is read, size-checked or decoded;
-an oversized body gets `413` only after a valid Pass. CORS is open (`*`), and
+an oversized body gets `413` only after a valid Pass. The request cap is
+`VGI_RPC_MAX_REQUEST_BYTES`, 32 MiB by default in hosted mode (64 MiB otherwise). CORS is open (`*`), and
 `Authorization` is never logged.
 
 **Function code** reads the Pass from `VgiFunctionCall.rpc`: `principal` is

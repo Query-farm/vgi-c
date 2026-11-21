@@ -81,6 +81,7 @@ _AUTH_ENV = (
     "VGI_FIXTURE_TEST_BEARERS",
     "VGI_ORCHARD_HOSTED",
     "VGI_CORS_ORIGIN",
+    "VGI_RPC_MAX_REQUEST_BYTES",
 )
 
 
@@ -413,6 +414,24 @@ class TestHostedWorker:
             sort_keys=True,
         )
         assert text == expected
+
+    def test_request_cap_defaults_to_32_mib(self, worker: _Worker) -> None:
+        """Hosted mode advertises a 32 MiB request cap when none is configured."""
+        _, headers, _ = _request(worker, "HEAD", "/health")
+        assert headers.get("vgi-max-request-bytes") == str(32 * 1024 * 1024)
+
+    def test_request_cap_from_environment(self, jwks: _Jwks, tmp_path: Path) -> None:
+        w = _start(_env(jwks.url, VGI_RPC_MAX_REQUEST_BYTES="65536"), tmp_path)
+        try:
+            _, headers, _ = _request(w, "HEAD", "/health")
+            assert headers.get("vgi-max-request-bytes") == "65536"
+            head = "POST /vgi.v3/catalog_attach HTTP/1.1\r\nHost: x\r\nContent-Length: 65537\r\n"
+            status, _, _ = _raw(
+                w, head + f"Authorization: Bearer {_use(_pass())}\r\n\r\n"
+            )
+            assert status == 413
+        finally:
+            _stop(w)
 
     def test_head_health_is_anonymous(self, worker: _Worker) -> None:
         status, headers, _ = _request(worker, "HEAD", "/health")

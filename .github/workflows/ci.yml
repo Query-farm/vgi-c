@@ -30,7 +30,7 @@ env:
   # verification and authentication before the body for hosted mode).
   # TODO(release-wave): back to main / a release tag once vgi-rpc-c protocol-3.4
   # is merged and released.
-  VGI_RPC_C_REF: 2a8dec91136ce015cc9643f164606928334fcf01
+  VGI_RPC_C_REF: 87e9cf3a264e06df74c4eaba8f8a7dbaf11d6c48
   # The Orchard hosted-mode conformance harness (test/hosted/) and the Python
   # client pins it is tested with.
   # TODO(release-wave): follow VGI_REF once the harness is on the released commit.
