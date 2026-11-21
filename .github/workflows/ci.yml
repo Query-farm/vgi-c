@@ -6,7 +6,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # TODO(release-wave): drop protocol-3.4 once it is merged.
+    branches: [main, protocol-3.4]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -25,10 +26,17 @@ env:
   # TODO(release-wave): repin to the released v2.0 commit carrying protocol 3.4.
   VGI_REF: 5b8b7a2a7e4e587e15573ddd62cf1dbcdf6b357e
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
-  # The vgi-rpc-c revision this SDK builds against (upload-URL v2).
+  # The vgi-rpc-c revision this SDK builds against (upload-URL v2, JWT
+  # verification and authentication before the body for hosted mode).
   # TODO(release-wave): back to main / a release tag once vgi-rpc-c protocol-3.4
   # is merged and released.
-  VGI_RPC_C_REF: d10b297c1098b0af1d5c85c9803662ea6f3aef53
+  VGI_RPC_C_REF: 2a8dec91136ce015cc9643f164606928334fcf01
+  # The Orchard hosted-mode conformance harness (test/hosted/) and the Python
+  # client pins it is tested with.
+  # TODO(release-wave): follow VGI_REF once the harness is on the released commit.
+  VGI_HOSTED_REF: fce57984a7e8ea35f9dcd4a034b5ed37c85ca5c5
+  VGI_PYTHON_HOSTED_REF: 85ae674bb83aa3d3eb0b05e01c7b5ceb0984b6cd
+  VGI_RPC_PYTHON_HOSTED_REF: f0fb6754ae5b70900ba21629a1e2d48eb2182774
 
 jobs:
   build:
@@ -48,7 +56,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libjson-c-dev libsodium-dev libsqlite3-dev \
-            libevent-dev libcurl4-openssl-dev libzstd-dev liblz4-dev zlib1g-dev
+            libevent-dev libcurl4-openssl-dev libzstd-dev liblz4-dev zlib1g-dev libssl-dev
 
       - name: Configure
         run: |
@@ -97,7 +105,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libjson-c5 libsodium23 libsqlite3-0 libevent-2.1-7t64 \
-            libevent-pthreads-2.1-7t64 libcurl4t64 libzstd1 liblz4-1 zlib1g
+            libevent-pthreads-2.1-7t64 libcurl4t64 libzstd1 liblz4-1 zlib1g libssl3t64
 
       - name: Download worker
         uses: actions/download-artifact@v4
@@ -121,3 +129,56 @@ jobs:
           VGI_SRC: ${{ github.workspace }}/vgi-upstream
           VGI_WORKER_BIN: ${{ github.workspace }}/bin/vgi-example-worker
           TRANSPORT: ${{ matrix.transport }}
+
+  hosted:
+    name: Orchard hosted mode
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the hosted-mode conformance harness
+        uses: actions/checkout@v4
+        with:
+          repository: Query-farm/vgi
+          ref: ${{ env.VGI_HOSTED_REF }}
+          path: vgi-upstream
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjson-c5 libsodium23 libsqlite3-0 libevent-2.1-7t64 \
+            libevent-pthreads-2.1-7t64 libcurl4t64 libzstd1 liblz4-1 zlib1g libssl3t64
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Download worker
+        uses: actions/download-artifact@v4
+        with:
+          name: vgi-c-worker-${{ github.sha }}
+
+      - name: Extract worker
+        run: mkdir -p bin && tar -xzf vgi-c-worker.tar.gz -C bin
+
+      - name: Shared hosted-mode conformance harness
+        run: |
+          W="$GITHUB_WORKSPACE/bin/vgi-example-worker"
+          vgi-upstream/test/hosted/run_hosted_conformance.py \
+            --worker-cwd "$GITHUB_WORKSPACE" \
+            --worker-cmd "$W --http 0" \
+            --refuse-cmd "$W" \
+            --refuse-cmd "$W --tcp 127.0.0.1:{port}" \
+            --refuse-cmd "$W --unix $RUNNER_TEMP/vgi-c-hosted-{port}.sock" \
+            --streaming-body
+
+      - name: Hosted-mode tests (port of vgi-python's)
+        env:
+          VGI_WORKER_BIN: ${{ github.workspace }}/bin/vgi-example-worker
+        run: |
+          uv run --no-project -p 3.13 \
+            --with "vgi-python[oauth] @ git+https://github.com/Query-farm/vgi-python@${VGI_PYTHON_HOSTED_REF}" \
+            --with "vgi-rpc[http,oauth] @ git+https://github.com/Query-farm/vgi-rpc-python@${VGI_RPC_PYTHON_HOSTED_REF}" \
+            --with pytest \
+            python -m pytest tests/check_hosted.py -v

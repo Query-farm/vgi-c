@@ -55,7 +55,8 @@ if(VGI_BUILD_WORKER)
     pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
     add_library(vgi src/worker.c src/opaque.c src/arguments.c src/storage.c src/filter.c src/catalog.c src/memory_catalog.c src/statistics.c src/context.c src/copy.c src/cache.c src/partition.c src/split.c)
     add_library(vgi::vgi ALIAS vgi)
-    target_sources(vgi PRIVATE src/attach_options.c src/credentials.c src/tickets.c src/constraints.c)
+    target_sources(vgi PRIVATE src/attach_options.c src/credentials.c src/tickets.c src/constraints.c
+        src/hosted.c)
     target_include_directories(vgi PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>)

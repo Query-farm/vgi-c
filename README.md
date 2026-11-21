@@ -326,10 +326,66 @@ restores the original catalog, options, and version specifications for its owner
 `<vgi/credentials.h>` also exposes the interoperable sealing primitives.
 
 HTTP CLI configuration includes `VGI_HTTP_HOST`, `VGI_HTTP_NO_COMPRESSION`,
+`VGI_RPC_MAX_REQUEST_BYTES` (the request-body cap, default 64 MiB),
 `VGI_CORS_ORIGIN`, `VGI_ACCESS_LOG` / `--access-log`, and
 `VGI_OPTIONAL_BEARER_TOKENS`. Access logs contain routing and identity information,
 not credentials or argument values. Attach-option secrets remain in private
 server storage; attachment cookies and split plans are sealed on HTTP.
+
+### Orchard hosted mode
+
+`VGI_ORCHARD_HOSTED=1` runs the worker as an Orchard *Field Worker*; the hosted
+base image sets it. Callers present a *Pass*: a short-lived
+[RFC 9068](https://www.rfc-editor.org/rfc/rfc9068) JWT access token issued by
+the Orchard Front Desk for one canonical Desk Address. The worker verifies every
+Pass locally and accepts no other credential. `VgiWorkerRun` and
+`VgiWorkerServeHttp` both apply it (`<vgi/hosted.h>`); the design is the
+extension repository's `docs/location-delegation.md`.
+
+```sh
+VGI_ORCHARD_HOSTED=1 \
+VGI_JWT_ISSUER=https://auth.queryfarm.cloud \
+VGI_JWT_AUDIENCE=https://desk.queryfarm.cloud/d/dep_123 \
+VGI_JWT_JWKS_URI=https://auth.queryfarm.cloud/.well-known/jwks.json \
+VGI_SIGNING_KEY="$(openssl rand -hex 32)" \
+./build/example-worker/vgi-example-worker --http 8080
+```
+
+**Startup fails closed** (an error and a non-zero exit) unless
+`VGI_JWT_ISSUER`, `VGI_JWT_AUDIENCE` and `VGI_JWT_JWKS_URI` each hold exactly
+one non-empty value (no commas) and `VGI_SIGNING_KEY` is at least 32 bytes
+(Orchard sets 64 hex characters; it must be the same on every machine of the
+deployment). It also refuses `VGI_BEARER_TOKENS`, `VGI_OPTIONAL_BEARER_TOKENS`,
+`VGI_RPC_GRANT_KEYS` or `--grant-key`, `VGI_OAUTH_RESOURCE`,
+`VGI_PROXY_PROOF_MODE` other than `off`, identity hooks (`resolve_token`,
+`mint_grant`), a custom `authenticate` callback, standard input/output,
+`--unix` and `--tcp`, `VGI_JWT_ALGORITHMS` naming `none` or `HS*`, and a
+`VGI_ORCHARD_HOSTED` value other than `1`/`0`/`true`/`false`/`yes`/`no`/`on`/`off`.
+
+**Verification** (vgi-rpc-c's `<vgi_rpc/jwt.h>`, OpenSSL): `ES256` only
+(`VGI_JWT_ALGORITHMS` can name ES384/512, RS*, PS*); `typ` `at+jwt`
+(case-insensitive, `application/` optional); exact `iss` and exactly one
+`aud`; `exp` required; `exp`, `nbf` and `iat` checked with 60 s of skew; `sub`
+a non-empty string. The JWKS is cached for at most 10 minutes or a shorter
+`Cache-Control: max-age`; once expired, the keys are discarded and a failed
+re-fetch answers `503` with `Retry-After`, never stale keys. An unknown `kid`
+re-fetches at most once per 60 s.
+
+**Every request needs a Pass** except `HEAD /health` and CORS preflights,
+including `GET /health`, other `OPTIONS` requests and unknown paths. Without a
+valid one the answer is `401` with `WWW-Authenticate: Bearer
+error="invalid_token"` (no `resource_metadata`), `VGI-Auth-Reason:
+missing_credential|invalid_credential|expired_credential` and the capability
+headers. Authentication runs before the body is read, size-checked or decoded;
+an oversized body gets `413` only after a valid Pass. CORS is open (`*`), and
+`Authorization` is never logged.
+
+**Function code** reads the Pass from `VgiFunctionCall.rpc`: `principal` is
+`sub`, `auth_domain` is `"orchard"` and `auth_claims_json` is the verified
+claim set as signed, so claims keep their JSON types. In hosted mode the example
+worker also registers `main.pass_claims(x BIGINT) -> VARCHAR`, the fixture of
+the shared conformance harness (`test/hosted/` in the extension repository),
+which `tests/check_hosted.py` and CI run against it.
 
 Enable OpenTelemetry in the example worker with an OTLP/HTTP collector:
 

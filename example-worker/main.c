@@ -4,13 +4,18 @@
 #include <string.h>
 
 #include "fixtures.h"
+#include "hosted_fixture.h"
 #include "identity_fixture.h"
+#include "vgi/hosted.h"
 
 int main(int argc, char **argv) {
     struct ArrowError error = {{0}};
     struct VgiWorker *worker = VgiWorkerNew(getenv("VGI_WORKER_CATALOG_NAME"));
     int rc = worker ? ExampleRegister(worker, &error) : ENOMEM;
     if (!rc) rc = ExampleSecondaryRegister(worker, &error);
+    int hosted = 0;
+    if (!rc) rc = VgiHostedModeEnabled(&hosted, &error);
+    if (!rc && hosted) rc = ExampleHostedRegister(worker, &error);
     struct ExampleIdentity identity = {0};
     if (!rc) rc = ExampleIdentityConfigure(worker, &identity, &argc, argv, &error);
     struct VgiTelemetry *telemetry = NULL;

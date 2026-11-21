@@ -73,3 +73,21 @@ exported, as CI's runner download does.
 Eight native test groups also passed. The RPC package has independent shared
 server, native-client, sanitizer, and HTTPS validation documented in its
 [conformance guide](https://github.com/Query-farm/vgi-rpc-c/blob/main/docs/conformance.md).
+
+Orchard hosted mode (`VGI_ORCHARD_HOSTED=1`, see the README) has two checks:
+`tests/check_hosted.py`, a port of vgi-python's hosted-mode tests plus the C
+runtime's JWKS-outage and authentication-before-body rules, and the extension
+repository's SDK-neutral harness `test/hosted/run_hosted_conformance.py`, which
+CI's hosted job runs against the example worker with stdio, `--unix` and
+`--tcp` as refusal commands:
+
+```sh
+VGI_C_BUILD=build ../vgi-python/.venv/bin/python -m pytest tests/check_hosted.py
+../vgi/test/hosted/run_hosted_conformance.py --worker-cwd . \
+  --worker-cmd './build/example-worker/vgi-example-worker --http 0' \
+  --refuse-cmd './build/example-worker/vgi-example-worker' \
+  --refuse-cmd './build/example-worker/vgi-example-worker --tcp 127.0.0.1:{port}' \
+  --refuse-cmd './build/example-worker/vgi-example-worker --unix /tmp/vgi-c-hosted-{port}.sock'
+```
+
+The vgi-python environment needs its `oauth` and `http` extras.

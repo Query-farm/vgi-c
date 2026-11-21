@@ -12,6 +12,7 @@
 
 #include "catalog_internal.h"
 #include "filter_internal.h"
+#include "hosted_internal.h"
 #include "memory_catalog_internal.h"
 #include "opaque_internal.h"
 #include "split_internal.h"
@@ -1806,7 +1807,12 @@ int VgiWorkerAddProtocol(struct VgiWorker *worker, const struct VgiRpcProtocol *
     return VgiRpcServerAddProtocol(worker->rpc, protocol, error);
 }
 int VgiWorkerServe(struct VgiWorker *worker, FILE *input, FILE *output, struct ArrowError *error) {
-    return VgiRpcServerServe(worker->rpc, input, output, error);
+    int hosted = 0;
+    int rc = VgiHostedModeEnabled(&hosted, error);
+    if (!rc && hosted)
+        rc = VgiHostedRefuse(error,
+                             "only --http is supported; standard input/output carries no Pass.");
+    return rc ? rc : VgiRpcServerServe(worker->rpc, input, output, error);
 }
 
 void VgiWorkerSetHttpOptions(struct VgiWorker *w, const struct VgiHttpOptions *o) {
@@ -1819,8 +1825,8 @@ int VgiWorkerSetTelemetry(struct VgiWorker *worker, struct VgiTelemetry *telemet
 static const struct VgiBatch *ticket_catalog(void *state, const char *name) {
     return VgiCatalogInfo(((struct VgiWorker *)state)->catalog_service, name);
 }
-int VgiWorkerServeHttp(struct VgiWorker *worker, const struct VgiHttpOptions *options,
-                       struct ArrowError *error) {
+static int serve_http(struct VgiWorker *worker, const struct VgiHttpOptions *options,
+                      struct ArrowError *error) {
     const struct VgiGrantKeys *keys =
         options->grant_keys ? options->grant_keys
                             : (options->identity ? options->identity->grant_keys : NULL);
@@ -1844,6 +1850,18 @@ int VgiWorkerServeHttp(struct VgiWorker *worker, const struct VgiHttpOptions *op
         if (rc) return rc;
     }
     return VgiRpcServerServeHttp(worker->rpc, options, error);
+}
+int VgiWorkerServeHttp(struct VgiWorker *worker, const struct VgiHttpOptions *options,
+                       struct ArrowError *error) {
+    int hosted = 0;
+    int rc = VgiHostedModeEnabled(&hosted, error);
+    if (rc || !hosted) return rc ? rc : serve_http(worker, options, error);
+    struct VgiHttpOptions effective;
+    struct VgiJwtVerifier *verifier = NULL;
+    rc = VgiHostedPrepare(options, &effective, &verifier, error);
+    if (!rc) rc = serve_http(worker, &effective, error);
+    VgiJwtVerifierFree(verifier);
+    return rc;
 }
 int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowError *error) {
     const char *unix_path = NULL, *tcp_address = NULL, *http_port = NULL;
@@ -1913,6 +1931,13 @@ int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowEr
         ArrowErrorSet(error, "Select one transport");
         return EINVAL;
     }
+    int hosted = 0;
+    int hosted_rc = VgiHostedModeEnabled(&hosted, error);
+    if (hosted_rc) return hosted_rc;
+    if (hosted && !http_port)
+        return VgiHostedRefuse(error,
+                               "only --http is supported; standard input/output, --unix and --tcp "
+                               "carry no Pass.");
     signal(SIGPIPE, SIG_IGN);
     if (http_port) {
         char *end = NULL;
@@ -1936,6 +1961,19 @@ int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowEr
         const char *host = getenv("VGI_HTTP_HOST");
         if (host && *host) options.host = host;
         if (getenv("VGI_HTTP_NO_COMPRESSION")) options.compression = 0;
+        /* The request cap: the most the server buffers for one request body,
+         * advertised as VGI-Max-Request-Bytes (vgi-rpc's VGI_RPC_MAX_REQUEST_BYTES). */
+        const char *cap = getenv("VGI_RPC_MAX_REQUEST_BYTES");
+        if (cap && *cap) {
+            char *end = NULL;
+            errno = 0;
+            long long value = strtoll(cap, &end, 10);
+            if (errno || *end || value < 1) {
+                ArrowErrorSet(error, "VGI_RPC_MAX_REQUEST_BYTES must be a positive integer");
+                return EINVAL;
+            }
+            options.max_request_bytes = value;
+        }
         unsigned char key_bytes[64][32];
         struct VgiGrantKeys keys = {.keys = (const unsigned char(*)[32])key_bytes,
                                     .max_ttl_seconds = 604800,
