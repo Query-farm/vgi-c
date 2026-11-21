@@ -23,7 +23,7 @@ env:
   # Test sources and the statically linked native runner come from this exact
   # VGI commit (protocol vgi.v3 / 3.4.0).
   # TODO(release-wave): repin to the released v2.0 commit carrying protocol 3.4.
-  VGI_REF: 865022e2557c6942187a659e2a9bd4fa68253d4e
+  VGI_REF: 5b8b7a2a7e4e587e15573ddd62cf1dbcdf6b357e
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
   # The vgi-rpc-c revision this SDK builds against (upload-URL v2).
   # TODO(release-wave): back to main / a release tag once vgi-rpc-c protocol-3.4
