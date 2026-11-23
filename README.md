@@ -165,8 +165,8 @@ COPY TO, buffered functions, and retained cached results. Inline catalog/bind
 calls can share the same pooled worker connection.
 
 Validated on Linux aarch64 for vgi.v3 / 3.4.0 with `ci/run-integration.sh`
-(suite and native Haybarn runner both at Query-farm/vgi `865022e`, branch
-`protocol-3.4`, with
+and `ci/run-vendor.sh` (suite and native Haybarn runner both at Query-farm/vgi
+`e99683f`, branch `protocol-3.4`, vgi-rpc-c `protocol-3.4`, with
 `VGI_ENGINE_CORRELATED_NAMED_ARGS=1` and
 `VGI_ENGINE_DELETE_RETURNING_VIRTUAL_COLUMNS=1` from its `make engine_test_env`):
 
@@ -176,9 +176,12 @@ Validated on Linux aarch64 for vgi.v3 / 3.4.0 with `ci/run-integration.sh`
 | Launcher SQL suite (422 staged) | 355 executed, all passed; 67 fixture-dependent skips |
 | HTTP SQL suite (419 staged) | 349 executed, all passed; 70 fixture-dependent skips |
 | Protected bearer lane (HTTP) | 2 passed |
-| Native C tests | 8 groups passed (also under `-DVGI_SANITIZE=ON` with Clang) |
-| Schema and IPC interoperability (vgi-python v0.52.0) | 263 exact schemas, 84 method signatures, 265 round trips, 9 malformed streams |
-| RPC, continuation and cancellation checks (vgi-python v0.52.0) | passed |
+| Blob-vendor lane: `test/sql/external_storage/*` | 18 passed (all 6 applicable `arguments_ref*.test`); 2 expected skips (`arguments_ref_state_ref.test`, single replica; `fetch_loopback_refused.test`) |
+| Blob-vendor lane: HTTP SQL suite with everything externalized | 349 executed, all passed; 70 fixture-dependent skips; bearer lane 2 passed |
+| Native C tests | 9 groups passed, including the nested-binary corpus |
+| Schema and IPC interoperability (vgi-python `protocol-3.4` 33099b4) | 264 exact schemas, 84 method signatures, 266 round trips, 9 malformed streams |
+| RPC, continuation and cancellation checks (vgi-python `protocol-3.4` 33099b4) | passed |
+| Orchard hosted-mode tests (`tests/check_hosted.py`) | 67 passed |
 
 The SQL skips require other fixture applications or services, such as the
 writable-table (`txfix`) worker, the extension's own visibility and
@@ -279,13 +282,55 @@ shared suite's `planned_days*` and `planned_events` fixtures; the latter records
 each planning call's days and `VgiFiltersDescribe()` lines (one stable
 description per pushed predicate, as vgi-python's fixture writes them).
 
-Protocol 3.4 changes no VGI record (the protocol hash is unchanged from 3.3); it
-moves vgi-rpc to upload-URL protocol v2 (`VGI-Upload-URL-Support: 2`: sized,
-SHA-256-checked client uploads) and makes `vgi_rpc.location.sha256` mandatory on
-request pointers. Both live in vgi-rpc-c; a worker that configures external
-storage gets them from `VgiRpcServerSetExternal`, whose allocator now receives
-each upload's size and digest. The example worker configures no external
-storage, so it advertises no upload support.
+Protocol 3.4 moves vgi-rpc to upload-URL protocol v2 (`VGI-Upload-URL-Support:
+2`: sized, SHA-256-checked client uploads), makes `vgi_rpc.location.sha256`
+mandatory on request pointers, and adds large values (vgi
+`docs/large-values-3.4.md`):
+
+- **Argument references.** `BindRequest.arguments` is nullable and
+  `arguments_location` (`struct<ref, size, sha256>`, the last field) names an
+  argument object the client uploaded once through the worker's
+  `__upload_url__` grant. Exactly one of the two is set; anything else fails
+  with `invalid_bind_request`. The worker resolves the location at each
+  request's entry (`read_context`) through vgi-rpc-c's object cache
+  (`VgiRpcResolveArgumentsLocation`), so `call->arguments` always holds the
+  arguments. A missing object answers `arguments_ref_missing` with "this
+  prepared statement's large argument has expired; prepare it again"; a bad
+  reference `invalid_arguments_ref`, other bytes `arguments_ref_integrity`.
+  With a blob vendor the HTTP server sends `VGI-Arguments-Ref-Bytes`
+  (`VGI_ARGUMENTS_REF_BYTES`, default 4194304), the capability signal;
+  `VGI_TEST_DISABLE_ARGUMENTS_REF=1` turns it off.
+- **The received bind call is kept.** `VgiFunctionCall.bind_call_bytes` holds
+  the bind call exactly as the client sent it, captured before sealed attach
+  and transaction values are opened; `bind_request` is the decoded working copy
+  and is never re-encoded. Table-buffering persistence stores those bytes (the
+  reference form), sealed with the storage key: they carry the bind's secrets.
+- **Split fingerprints** hash an `arguments_location` as size and SHA-256,
+  never its sealed `ref`.
+- **Single-replica streams.** vgi-c keeps HTTP streams in process, so its
+  `init` stays in memory; it has no cursor and no stored `StateRef`.
+
+The request schemas are regenerated from vgi-python, and
+`conformance/nested-binary/` is the shared corpus `tests/nested_binary_test.c`
+checks (byte identity of `bind_call`, typed construction, null arguments,
+re-encoding after opening sealed values, fingerprints, sealed persistence).
+
+### Blob vendor and storage externalization
+
+With `VGI_BLOB_VENDOR_URL` and `VGI_BLOB_VENDOR_TOKEN` set, the HTTP server
+(through vgi-rpc-c's `VgiHttpConfigureFromEnv`) externalizes result batches of
+at least `VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES` through the vendor, grants client
+uploads from it (`VGI_RPC_MAX_UPLOAD_BYTES`, never above
+`VGI_RPC_MAX_FETCH_BYTES`), resolves argument references from it, and sends
+`VGI-Arguments-Ref-Bytes`. `VGI_STORAGE_EXTERNALIZE=1` additionally envelopes
+every worker-storage value (`0x00 || raw`, or `0x01 || u64be size || sha256 ||
+object_id`) and keeps values of at least `VGI_STORAGE_EXTERNALIZE_BYTES` as
+vendor blobs (purpose `fs`), verified against the pointer on every read.
+
+The example worker serves the extension's `blob_test` catalog
+(`example-worker/blob_fixtures.c`, `blob_storage.c`; metadata captured from
+vgi-python's fixture worker into `generated/blob_catalog.arrow`), so the
+extension's vendor lane runs against it.
 
 Protocol 3.3 function visibility: `FunctionInfo.visibility` is null (public),
 `VGI_FUNCTION_VISIBILITY_PUBLIC` or `VGI_FUNCTION_VISIBILITY_TABLE_ONLY`;
@@ -326,7 +371,8 @@ restores the original catalog, options, and version specifications for its owner
 `<vgi/credentials.h>` also exposes the interoperable sealing primitives.
 
 HTTP CLI configuration includes `VGI_HTTP_HOST`, `VGI_HTTP_NO_COMPRESSION`,
-`VGI_RPC_MAX_REQUEST_BYTES` (the request-body cap, default 64 MiB),
+`VGI_RPC_MAX_REQUEST_BYTES` (the request-body cap, default 64 MiB), the blob
+vendor variables above,
 `VGI_CORS_ORIGIN`, `VGI_ACCESS_LOG` / `--access-log`, and
 `VGI_OPTIONAL_BEARER_TOKENS`. Access logs contain routing and identity information,
 not credentials or argument values. Attach-option secrets remain in private

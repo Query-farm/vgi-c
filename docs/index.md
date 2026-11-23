@@ -66,8 +66,16 @@ COPY TO, and cached results retained across later requests.
 launch or http), enforces an allowlist of fixture-dependent skip reasons and an
 executed-case floor, and is what CI runs with the native runner built at the
 pinned VGI commit. The vgi.v3 / 3.4.0 validation (Linux aarch64, suite and
-native runner at `865022e`) executed 354 subprocess, 355 launcher and 349 HTTP
-cases with no failures, plus the 2-case bearer lane. A Haybarn runner needs the
+native runner at `e99683f`) executed 354 subprocess, 355 launcher and 349 HTTP
+cases with no failures, plus the 2-case bearer lane.
+
+`ci/run-vendor.sh` runs the extension's blob-vendor lane (`make
+test_http_vendor`) against the C worker: `test/sql/external_storage/*`,
+including the protocol 3.4 `arguments_ref*.test` files, one file at a time
+with a worker per file, then the HTTP suite with every value externalized
+through vgi-rpc-python's fake vendor. It needs `uv` (the fake vendor runs with
+`uvx`). `arguments_ref_state_ref.test` is an expected skip: vgi-c keeps streams
+in process, so its init is never a stored `StateRef`. A Haybarn runner needs the
 `VGI_ENGINE_*` variables from the vgi checkout's `make -s engine_test_env`
 exported, as CI's runner download does.
 Eight native test groups also passed. The RPC package has independent shared

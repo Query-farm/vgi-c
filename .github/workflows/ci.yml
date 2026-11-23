@@ -22,15 +22,16 @@ concurrency:
 
 env:
   # Test sources and the statically linked native runner come from this exact
-  # VGI commit (protocol vgi.v3 / 3.4.0).
+  # VGI commit (protocol vgi.v3 / 3.4.0, with the large-value vendor-lane files).
   # TODO(release-wave): repin to the released v2.0 commit carrying protocol 3.4.
-  VGI_REF: 5b8b7a2a7e4e587e15573ddd62cf1dbcdf6b357e
+  VGI_REF: e99683f2af215c5a166697945e796c91d0cc66fe
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
   # The vgi-rpc-c revision this SDK builds against (upload-URL v2, JWT
-  # verification and authentication before the body for hosted mode).
+  # verification and authentication before the body for hosted mode, StateRef,
+  # argument references, the object cache and the blob-vendor client).
   # TODO(release-wave): back to main / a release tag once vgi-rpc-c protocol-3.4
   # is merged and released.
-  VGI_RPC_C_REF: 87e9cf3a264e06df74c4eaba8f8a7dbaf11d6c48
+  VGI_RPC_C_REF: b7e1ba5e7a35db17f4a6823f685a1198819af4dd
   # The Orchard hosted-mode conformance harness (test/hosted/) and the Python
   # client pins it is tested with.
   # TODO(release-wave): follow VGI_REF once the harness is on the released commit.
@@ -129,6 +130,57 @@ jobs:
           VGI_SRC: ${{ github.workspace }}/vgi-upstream
           VGI_WORKER_BIN: ${{ github.workspace }}/bin/vgi-example-worker
           TRANSPORT: ${{ matrix.transport }}
+
+  vendor:
+    # The extension's blob-vendor lane (make test_http_vendor) against this
+    # worker: test/sql/external_storage/* (including the protocol 3.4
+    # arguments_ref*.test files) and the integration suite over HTTP with
+    # every value externalized through the fake vendor. See ci/run-vendor.sh.
+    name: Blob vendor lane
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the pinned vgi test suite
+        uses: actions/checkout@v4
+        with:
+          repository: Query-farm/vgi
+          ref: ${{ env.VGI_REF }}
+          path: vgi-upstream
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjson-c5 libsodium23 libsqlite3-0 libevent-2.1-7t64 \
+            libevent-pthreads-2.1-7t64 libcurl4t64 libzstd1 liblz4-1 zlib1g libssl3t64
+
+      # The fake vendor runs with uvx from a pinned vgi-rpc-python commit.
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Download worker
+        uses: actions/download-artifact@v4
+        with:
+          name: vgi-c-worker-${{ github.sha }}
+
+      - name: Extract worker
+        run: mkdir -p bin && tar -xzf vgi-c-worker.tar.gz -C bin
+
+      - name: Download native runner matching the test suite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VGI_SRC: ${{ github.workspace }}/vgi-upstream
+        run: |
+          python3 "$VGI_SRC/scripts/ci_fetch_native_runner.py" \
+            --source "$VGI_SRC" --output "$RUNNER_TEMP/vgi-native"
+
+      - name: Run the vendor lane
+        run: ci/run-vendor.sh
+        env:
+          VGI_SRC: ${{ github.workspace }}/vgi-upstream
+          VGI_WORKER_BIN: ${{ github.workspace }}/bin/vgi-example-worker
 
   hosted:
     name: Orchard hosted mode
