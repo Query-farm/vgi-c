@@ -37,11 +37,18 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VGI_SRC="$(cd "$VGI_SRC" && pwd)"
 
-# scripts/run_tests.py runs <checkout>/build/release/test/unittest.
-mkdir -p "$VGI_SRC/build/release/test"
-if [ "$(readlink -f "$HAYBARN_UNITTEST")" != "$(readlink -f "$VGI_SRC/build/release/test/unittest")" ]; then
-  ln -sfn "$(readlink -f "$HAYBARN_UNITTEST")" "$VGI_SRC/build/release/test/unittest"
-fi
+# scripts/run_tests.py runs <checkout>/build/release/test/unittest. A wrapper
+# rather than a link: a statically linked native runner changes into the
+# source root it was built in unless --test-dir names one.
+RUNNER="$(readlink -f "$HAYBARN_UNITTEST")"
+WRAPPER="$VGI_SRC/build/release/test/unittest"
+mkdir -p "$(dirname "$WRAPPER")"
+rm -f "$WRAPPER"
+{
+  echo '#!/bin/sh'
+  printf 'exec "%s" --test-dir "%s" "$@"\n' "$RUNNER" "$VGI_SRC"
+} > "$WRAPPER"
+chmod +x "$WRAPPER"
 
 cd "$VGI_SRC" || exit 1
 # shellcheck source=/dev/null
