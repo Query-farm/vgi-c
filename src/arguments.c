@@ -2,7 +2,18 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "arguments_internal.h"
 #include "vgi/worker.h"
+
+int VgiBindArgumentsCheck(struct VgiRpcCall *call, const struct VgiBatch *bind) {
+    if (VgiFieldIndex(&bind->schema, "arguments_location") < 0) return 0;
+    int inline_set =
+        VgiFieldIndex(&bind->schema, "arguments") >= 0 && !VgiBatchIsNull(bind, "arguments");
+    int location_set = !VgiBatchIsNull(bind, "arguments_location");
+    if (inline_set != location_set) return 0;
+    return VgiRpcFail(call, "StatusError", "INVALID_ARGUMENT", VGI_KIND_INVALID_BIND_REQUEST,
+                      VGI_INVALID_BIND_REQUEST_MESSAGE);
+}
 
 const struct ArrowArrayView *VgiArgument(const struct VgiFunctionCall *call, int64_t position,
                                          const char *name) {

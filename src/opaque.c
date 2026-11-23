@@ -75,10 +75,12 @@ static int rewrite_value(struct VgiRpcCall *call, const struct ArrowSchema *sche
         value->storage_type != NANOARROW_TYPE_LARGE_BINARY)
         return reject(call, name);
     if (opaque) {
-        if (seal && !strcmp(name, "attach_opaque_data") && (*(struct ArrowBuffer *)call->application_state).size_bytes)
+        if (seal && !strcmp(name, "attach_opaque_data") &&
+            (*(struct ArrowBuffer *)call->application_state).size_bytes)
             return ArrowArrayAppendBytes(
-                out, (struct ArrowBufferView){{(*(struct ArrowBuffer *)call->application_state).data},
-                                              (*(struct ArrowBuffer *)call->application_state).size_bytes});
+                out, (struct ArrowBufferView){
+                         {(*(struct ArrowBuffer *)call->application_state).data},
+                         (*(struct ArrowBuffer *)call->application_state).size_bytes});
         struct ArrowStringView text = VgiValueString(value, row);
         struct ArrowBuffer bytes;
         ArrowBufferInit(&bytes);
@@ -141,11 +143,13 @@ static int rewrite(struct VgiRpcCall *call, const struct VgiBatch *source, struc
         struct ArrowBufferView value = VgiBatchBytes(source, "attach_opaque_data");
         if ((*(struct ArrowBuffer *)call->application_state).size_bytes &&
             (value.size_bytes != (*(struct ArrowBuffer *)call->application_state).size_bytes ||
-             memcmp(value.data.data, (*(struct ArrowBuffer *)call->application_state).data, (size_t)value.size_bytes)))
+             memcmp(value.data.data, (*(struct ArrowBuffer *)call->application_state).data,
+                    (size_t)value.size_bytes)))
             return reject(call, "attach_opaque_data");
         if (!(*(struct ArrowBuffer *)call->application_state).size_bytes)
             NANOARROW_RETURN_NOT_OK(
-                ArrowBufferAppend(&(*(struct ArrowBuffer *)call->application_state), value.data.data, value.size_bytes));
+                ArrowBufferAppend(&(*(struct ArrowBuffer *)call->application_state),
+                                  value.data.data, value.size_bytes));
     }
     int rc = VgiBatchInit(out, &source->schema, &call->error);
     for (int64_t row = 0; !rc && row < source->array.length; ++row) {
@@ -157,6 +161,28 @@ static int rewrite(struct VgiRpcCall *call, const struct VgiBatch *source, struc
     if (!rc) rc = VgiBatchFinish(out, &call->error);
     return rc;
 }
+int VgiOpaqueCaptureBindCall(const struct VgiRpcCall *call, struct ArrowBuffer *out) {
+    const char *method = call->method ? call->method->name : "";
+    int direct = !strcmp(method, "bind"),
+        nested = !strcmp(method, "init") || !strncmp(method, "table_function_", 15);
+    if (!direct && !nested) return 0;
+    struct ArrowBufferView request = VgiBatchBytes(&call->request, "request");
+    if (direct)
+        return request.size_bytes ? ArrowBufferAppend(out, request.data.data, request.size_bytes)
+                                  : 0;
+    if (!request.size_bytes) return 0;
+    struct VgiBatch outer = {0};
+    struct ArrowError error = {{0}};
+    int rc = VgiBatchDecode(&outer, request, &error);
+    if (!rc) {
+        struct ArrowBufferView bind_call = VgiBatchBytes(&outer, "bind_call");
+        if (bind_call.size_bytes)
+            rc = ArrowBufferAppend(out, bind_call.data.data, bind_call.size_bytes);
+    } else
+        rc = 0; /* the dispatcher reports a malformed request */
+    VgiBatchReset(&outer);
+    return rc;
+}
 int VgiOpaqueOpenRequest(struct VgiRpcCall *call) {
     if (!call->sealing_key) return 0;
     struct VgiBatch opened = {0};
@@ -164,6 +190,17 @@ int VgiOpaqueOpenRequest(struct VgiRpcCall *call) {
     if (!rc) {
         VgiBatchReset(&call->request);
         call->request = opened;
+    } else
+        VgiBatchReset(&opened);
+    return rc;
+}
+int VgiOpaqueOpenBatch(struct VgiRpcCall *call, struct VgiBatch *batch) {
+    if (!call->sealing_key || !batch->array.release) return 0;
+    struct VgiBatch opened = {0};
+    int rc = rewrite(call, batch, &opened, 0, 0);
+    if (!rc) {
+        VgiBatchReset(batch);
+        *batch = opened;
     } else
         VgiBatchReset(&opened);
     return rc;

@@ -32,6 +32,13 @@ struct VgiFunctionCall {
      * output. The reply says HAVE_MORE_OUTPUT, and the framework calls resume
      * for each next batch until one is returned without it. Reset per call. */
     int more_output;
+    /* The bind call's bytes exactly as the client sent them (protocol 3.4,
+     * vgi docs/large-values-3.4.md §3.3 rules 1, 4 and 11): sealed attach and
+     * transaction envelopes intact, and the arguments_location (never the
+     * resolved arguments) when the client externalized them. bind_request is
+     * the decoded working copy, with opaque values opened and never written
+     * back; anything that re-serializes the bind call uses these bytes. */
+    struct ArrowBuffer bind_call_bytes;
 };
 enum VgiFunctionKind { VGI_SCALAR, VGI_TABLE, VGI_TABLE_IN_OUT, VGI_AGGREGATE, VGI_BUFFERING };
 struct VgiFunction {
@@ -78,6 +85,10 @@ struct VgiFunction {
      * catalog max_workers of 1 (one connection shared by every pipeline). */
     int (*resume)(void *userdata, struct VgiFunctionCall *call, struct VgiBatch *output,
                   struct ArrowBuffer *metadata);
+    /* BindResponse.repeatability: NULL answers "UNKNOWN". "STABLE_WITHIN_QUERY"
+     * promises equivalent scans within one query; the client then rebinds a
+     * serialized plan and requires byte-identical bind requests. */
+    const char *repeatability;
 };
 
 /* Function info remains a builder until registration: set generated

@@ -10,12 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "arguments_internal.h"
 #include "catalog_internal.h"
 #include "filter_internal.h"
 #include "hosted_internal.h"
 #include "memory_catalog_internal.h"
 #include "opaque_internal.h"
 #include "split_internal.h"
+#include "storage_internal.h"
 #include "tickets_internal.h"
 #include "vgi/catalog.h"
 #include "vgi/copy.h"
@@ -67,6 +69,7 @@ static int enum_is(struct ArrowStringView text, const char *expected) {
     return 1;
 }
 static int worker_dispatch(void *state, struct VgiRpcCall *call, struct VgiRpcReply *reply);
+static struct ArrowBufferView buffer_view(const struct ArrowBuffer *buffer);
 
 int VgiArgumentInit(struct ArrowSchema *out, const char *name, const char *format, int constant,
                     int named, int variadic, struct ArrowError *error) {
@@ -403,8 +406,13 @@ static char *catalog_of(struct VgiWorker *worker, const struct VgiBatch *batch) 
     if (object) json_object_put(object);
     return result;
 }
+/* Resolve the registered function a request names. `resolved` is the bind's
+ * argument batch when the caller already resolved it (read_context, which
+ * follows an arguments_location); NULL decodes the request's inline
+ * `arguments` (aggregates and table-buffering requests). */
 static struct RegisteredFunction *find_function(struct VgiWorker *worker,
-                                                const struct VgiBatch *bind) {
+                                                const struct VgiBatch *bind,
+                                                const struct VgiBatch *resolved) {
     char *path = schema_path(bind), *catalog = catalog_of(worker, bind);
     struct RegisteredFunction *result = NULL;
     struct ArrowStringView name = VgiBatchString(bind, "function_name");
@@ -418,7 +426,11 @@ static struct RegisteredFunction *find_function(struct VgiWorker *worker,
     }
     struct VgiFunctionCall arguments = {0};
     struct ArrowBufferView argument_bytes = VgiBatchBytes(bind, "arguments");
-    if (argument_bytes.size_bytes && VgiBatchDecode(&arguments.arguments, argument_bytes, NULL)) {
+    int have_arguments = resolved ? resolved->array.release != NULL : argument_bytes.size_bytes > 0;
+    if (resolved && have_arguments)
+        arguments.arguments = *resolved; /* borrowed; never reset below */
+    else if (!resolved && have_arguments &&
+             VgiBatchDecode(&arguments.arguments, argument_bytes, NULL)) {
         if (input.release) ArrowSchemaRelease(&input);
         free(path);
         free(catalog);
@@ -480,9 +492,8 @@ static struct RegisteredFunction *find_function(struct VgiWorker *worker,
                         valid = 0;
                 }
             }
-            if (argument_bytes.size_bytes &&
-                (const_varargs ? positional_count < expected_constants
-                               : expected_constants != positional_count))
+            if (have_arguments && (const_varargs ? positional_count < expected_constants
+                                                 : expected_constants != positional_count))
                 valid = 0;
             int64_t column = 0;
             for (int64_t j = 0; valid && input.release && j < fn->function.arguments.n_children;
@@ -533,7 +544,7 @@ static struct RegisteredFunction *find_function(struct VgiWorker *worker,
         }
     }
     if (input.release) ArrowSchemaRelease(&input);
-    VgiBatchReset(&arguments.arguments);
+    if (!resolved) VgiBatchReset(&arguments.arguments);
     free(path);
     free(catalog);
     return result;
@@ -852,7 +863,12 @@ static int catalog_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     return rc;
 }
 
+/* Contexts are zero-initialized; a zero ArrowBuffer has no allocator yet. */
+static void ensure_buffer(struct ArrowBuffer *buffer) {
+    if (!buffer->allocator.reallocate) ArrowBufferInit(buffer);
+}
 static void function_call_reset(struct VgiFunctionCall *context) {
+    if (context->bind_call_bytes.allocator.free) ArrowBufferReset(&context->bind_call_bytes);
     VgiBatchReset(&context->bind_request);
     VgiBatchReset(&context->init_request);
     VgiBatchReset(&context->arguments);
@@ -866,12 +882,61 @@ static void function_call_reset(struct VgiFunctionCall *context) {
     VgiFiltersFree(context->filters);
     VgiBatchReset(&context->split_payloads);
 }
+/* The bind's arguments (large-values spec §5a): inline `arguments`, or the
+ * object an `arguments_location` names, opened and fetched through vgi-rpc's
+ * object cache. A BindRequest (it has the arguments_location column) must set
+ * exactly one of the two. */
+static int read_arguments(struct VgiFunctionCall *context) {
+    struct VgiRpcCall *call = context->rpc;
+    const struct VgiBatch *bind = &context->bind_request;
+    int rc = VgiBindArgumentsCheck(call, bind);
+    if (rc) return rc;
+    int location_set = VgiFieldIndex(&bind->schema, "arguments_location") >= 0 &&
+                       !VgiBatchIsNull(bind, "arguments_location");
+    if (!location_set) {
+        struct ArrowBufferView value = VgiBatchBytes(bind, "arguments");
+        return value.size_bytes ? VgiBatchDecode(&context->arguments, value, &call->error) : 0;
+    }
+    struct VgiResolvedBytes resolved = {0};
+    rc = VgiRpcResolveArgumentsLocation(call, bind, "arguments_location", &resolved);
+    if (rc) {
+        if (call->error_kind && !strcmp(call->error_kind, VGI_RPC_KIND_ARGUMENTS_REF_MISSING))
+            return VgiRpcFail(call, "StatusError", "NOT_FOUND", VGI_RPC_KIND_ARGUMENTS_REF_MISSING,
+                              VGI_ARGUMENTS_REF_MISSING_MESSAGE);
+        if (call->error_kind && *call->error_kind &&
+            strncmp(call->error.message, call->error_kind, strlen(call->error_kind))) {
+            /* Name the kind in the message too: the DuckDB extension shows
+             * only "<type>: <message>" (as vgi-python does). */
+            char message[sizeof(call->error.message)];
+            snprintf(message, sizeof(message), "%.64s: %.900s", call->error_kind,
+                     call->error.message);
+            snprintf(call->error.message, sizeof(call->error.message), "%s", message);
+        }
+        return rc ? rc : EINVAL;
+    }
+    rc = VgiBatchDecode(&context->arguments, resolved.view, &call->error);
+    VgiResolvedBytesRelease(&resolved);
+    if (rc)
+        return VgiRpcFail(call, "StatusError", "INVALID_ARGUMENT",
+                          VGI_RPC_KIND_INVALID_ARGUMENTS_REF,
+                          "invalid_arguments_ref: the uploaded arguments are not a valid arguments "
+                          "IPC stream");
+    return 0;
+}
+/* Copy the call's held bind call bytes into the context (once). */
+static int hold_bind_call(struct VgiFunctionCall *context) {
+    const struct VgiRequestState *request = context->rpc->application_state;
+    ensure_buffer(&context->bind_call_bytes);
+    if (context->bind_call_bytes.size_bytes || !request || !request->bind_call.size_bytes) return 0;
+    return ArrowBufferAppend(&context->bind_call_bytes, request->bind_call.data,
+                             request->bind_call.size_bytes);
+}
 static int read_context(struct VgiFunctionCall *context) {
     struct ArrowError *error = &context->rpc->error;
-    const char *names[] = {"arguments", "settings", "secrets"};
-    struct VgiBatch *outputs[] = {&context->arguments, &context->settings, &context->secrets};
-    int rc = 0;
-    for (int i = 0; !rc && i < 3; ++i) {
+    const char *names[] = {"settings", "secrets"};
+    struct VgiBatch *outputs[] = {&context->settings, &context->secrets};
+    int rc = read_arguments(context);
+    for (int i = 0; !rc && i < 2; ++i) {
         struct ArrowBufferView value = VgiBatchBytes(&context->bind_request, names[i]);
         if (value.size_bytes) rc = VgiBatchDecode(outputs[i], value, error);
     }
@@ -888,9 +953,10 @@ static int bind_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     context.rpc = call;
     ArrowBufferInit(&context.execution_id);
     int rc = VgiBatchChild(&call->request, "request", &context.bind_request, &call->error);
+    if (!rc) rc = hold_bind_call(&context);
     if (!rc) rc = read_context(&context);
     struct RegisteredFunction *registered =
-        rc ? NULL : find_function(worker, &context.bind_request);
+        rc ? NULL : find_function(worker, &context.bind_request, &context.arguments);
     if (!rc && !registered)
         rc = VgiRpcFail(call, "ValueError", "INVALID_ARGUMENT", "",
                         "No matching function in requested catalog/schema");
@@ -907,8 +973,12 @@ static int bind_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     if (!rc) rc = VgiIpcWriteSchema(&context.output_schema, &bytes, &call->error);
     if (!rc) rc = VgiBatchSetBytes(&payload, "output_schema", bytes.data, bytes.size_bytes);
     if (!rc) rc = VgiBatchSetBytes(&payload, "opaque_data", "", 0);
-    /* vgi.v3: no structured projection profiles; repeatability is not promised. */
-    if (!rc) rc = VgiBatchSetString(&payload, "repeatability", "UNKNOWN");
+    /* vgi.v3: no structured projection profiles; repeatability is the
+     * function's promise, UNKNOWN unless it makes one. */
+    if (!rc)
+        rc = VgiBatchSetString(
+            &payload, "repeatability",
+            registered->function.repeatability ? registered->function.repeatability : "UNKNOWN");
     if (!rc && !VgiBatchInt(&context.bind_request, "resolved_secrets_provided", 0)) {
         struct VgiFunction *fn = &registered->function;
         if (fn->secret_lookups)
@@ -1123,9 +1193,10 @@ static int init_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     if (!rc)
         rc = VgiBatchChild(&context->init_request, "bind_call", &context->bind_request,
                            &call->error);
+    if (!rc) rc = hold_bind_call(context);
     if (!rc) rc = read_context(context);
     struct RegisteredFunction *registered =
-        rc ? NULL : find_function(worker, &context->bind_request);
+        rc ? NULL : find_function(worker, &context->bind_request, &context->arguments);
     if (!rc && !registered)
         rc = VgiRpcFail(call, "ValueError", "INVALID_ARGUMENT", "",
                         "No matching function in requested catalog/schema");
@@ -1177,10 +1248,16 @@ static int init_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     }
     if (!rc) rc = VgiStorageOpen(NULL, &context->storage, &call->error);
     if (!rc && stream->function->kind == VGI_BUFFERING && !execution.size_bytes) {
+        /* Every pool worker serves later process/combine calls from storage.
+         * Persist the bind call as received (the reference form, sealed
+         * opaque data intact), never the decoded copy with opened values or
+         * resolved arguments, and seal it: it carries the bind's secrets. */
         struct ArrowBuffer bind_bytes;
         ArrowBufferInit(&bind_bytes);
-        rc = VgiIpcWriteBatch(&context->bind_request.schema, &context->bind_request.array, NULL,
-                              &bind_bytes, &call->error);
+        rc = VgiStorageSeal(context->storage, "function.bind",
+                            (struct ArrowBufferView){{context->execution_id.data},
+                                                     context->execution_id.size_bytes},
+                            buffer_view(&context->bind_call_bytes), &bind_bytes, &call->error);
         if (!rc)
             rc = VgiStoragePut(context->storage,
                                (struct ArrowBufferView){{context->execution_id.data},
@@ -1236,7 +1313,7 @@ static int aggregate_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
         function_call_reset(&context);
         return rc;
     }
-    struct RegisteredFunction *registered = rc ? NULL : find_function(worker, &request);
+    struct RegisteredFunction *registered = rc ? NULL : find_function(worker, &request, NULL);
     if (!rc && (!registered || registered->function.kind != VGI_AGGREGATE))
         rc = VgiRpcFail(call, "ValueError", "INVALID_ARGUMENT", "", "Aggregate function not found");
     struct VgiFunction *function = registered ? &registered->function : NULL;
@@ -1397,7 +1474,7 @@ static int aggregate_window_dispatch(struct VgiWorker *worker, struct VgiRpcCall
         if (!rc)
             rc = VgiStoragePut(context.storage, execution, key, buffer_view(&bytes), &call->error);
     } else if (!rc) {
-        struct RegisteredFunction *registered = find_function(worker, &request);
+        struct RegisteredFunction *registered = find_function(worker, &request, NULL);
         struct VgiFunction *fn = registered ? &registered->function : NULL;
         if (!fn || !fn->aggregate_update || !fn->aggregate_finalize)
             rc = VgiRpcFail(call, "ValueError", "INVALID_ARGUMENT", "",
@@ -1521,7 +1598,7 @@ static int aggregate_streaming_dispatch(struct VgiWorker *worker, struct VgiRpcC
                                "aggregate.streaming", buffer_view(&bytes), &call->error);
         if (!rc) rc = VgiBatchSetBytes(&payload, "execution_id", hex, 32);
     } else if (!rc) {
-        struct RegisteredFunction *registered = find_function(worker, &request);
+        struct RegisteredFunction *registered = find_function(worker, &request, NULL);
         struct VgiFunction *fn = registered ? &registered->function : NULL;
         if (!fn || !fn->aggregate_update || !fn->aggregate_finalize)
             rc = VgiRpcFail(call, "ValueError", "INVALID_ARGUMENT", "",
@@ -1649,7 +1726,7 @@ static int buffering_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
         rc = 0;
     } else {
         struct RegisteredFunction *registered =
-            rc ? NULL : find_function(worker, &context.init_request);
+            rc ? NULL : find_function(worker, &context.init_request, NULL);
         struct VgiFunction *fn = registered ? &registered->function : NULL;
         if (!rc && (!fn || fn->kind != VGI_BUFFERING))
             rc = VgiRpcFail(call, "ValueError", "NOT_FOUND", "", "Buffered function not found");
@@ -1659,7 +1736,14 @@ static int buffering_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
                 ArrowBufferAppend(&context.execution_id, execution.data.data, execution.size_bytes);
         if (!rc)
             rc = VgiStorageGet(context.storage, execution, "function.bind", &bytes, &call->error);
-        if (!rc) rc = VgiBatchDecode(&context.bind_request, buffer_view(&bytes), &call->error);
+        ensure_buffer(&context.bind_call_bytes);
+        if (!rc)
+            rc = VgiStorageOpenSealed(context.storage, "function.bind", execution,
+                                      buffer_view(&bytes), &context.bind_call_bytes, &call->error);
+        if (!rc)
+            rc = VgiBatchDecode(&context.bind_request, buffer_view(&context.bind_call_bytes),
+                                &call->error);
+        if (!rc) rc = VgiOpaqueOpenBatch(call, &context.bind_request);
         if (!rc) rc = read_context(&context);
         if (!rc)
             rc = fn->bind ? fn->bind(fn->userdata, &context, &context.output_schema)
@@ -1709,9 +1793,10 @@ static int planning_dispatch(struct VgiWorker *worker, struct VgiRpcCall *call,
     int rc = VgiBatchChild(&call->request, "request", &context.init_request, &call->error);
     if (!rc)
         rc = VgiBatchChild(&context.init_request, "bind_call", &context.bind_request, &call->error);
+    if (!rc) rc = hold_bind_call(&context);
     if (!rc) rc = read_context(&context);
     struct RegisteredFunction *registered =
-        rc ? NULL : find_function(worker, &context.bind_request);
+        rc ? NULL : find_function(worker, &context.bind_request, &context.arguments);
     if (!rc && !registered)
         rc = VgiRpcFail(call, "ValueError", "INVALID_ARGUMENT", "",
                         "No matching function in requested catalog/schema");
@@ -1788,16 +1873,21 @@ static int worker_dispatch_impl(void *state, struct VgiRpcCall *call, struct Vgi
                       "Method is not implemented by this worker");
 }
 static void release_envelope(void *state) {
-    ArrowBufferReset(state);
-    free(state);
+    struct VgiRequestState *request = state;
+    ArrowBufferReset(&request->envelope);
+    ArrowBufferReset(&request->bind_call);
+    free(request);
 }
 static int worker_dispatch(void *state, struct VgiRpcCall *call, struct VgiRpcReply *reply) {
-    struct ArrowBuffer *envelope = calloc(1, sizeof(*envelope));
-    if (!envelope) return ENOMEM;
-    ArrowBufferInit(envelope);
-    call->application_state = envelope;
+    struct VgiRequestState *request = calloc(1, sizeof(*request));
+    if (!request) return ENOMEM;
+    ArrowBufferInit(&request->envelope);
+    ArrowBufferInit(&request->bind_call);
+    call->application_state = request;
     call->release_application_state = release_envelope;
-    int rc = VgiOpaqueOpenRequest(call);
+    /* Hold the received bind call before opaque values are opened (rule 11). */
+    int rc = VgiOpaqueCaptureBindCall(call, &request->bind_call);
+    if (!rc) rc = VgiOpaqueOpenRequest(call);
     if (!rc) rc = worker_dispatch_impl(state, call, reply);
     if (!rc) rc = VgiOpaqueSealResponse(call, &reply->value);
     return rc;
@@ -1851,16 +1941,70 @@ static int serve_http(struct VgiWorker *worker, const struct VgiHttpOptions *opt
     }
     return VgiRpcServerServeHttp(worker->rpc, options, error);
 }
+/* VGI-Arguments-Ref-Bytes (protocol 3.4, large-values spec §5): the value to
+ * advertise, VGI_ARGUMENTS_REF_BYTES or 4 MiB. The variable must be a positive
+ * decimal integer of at most 19 digits with no sign or leading zero, so a typo
+ * stops startup instead of silently advertising nothing. */
+#define VGI_ARGUMENTS_REF_BYTES_HEADER "VGI-Arguments-Ref-Bytes"
+#define VGI_DEFAULT_ARGUMENTS_REF_BYTES "4194304"
+static int arguments_ref_bytes(char out[24], struct ArrowError *error) {
+    const char *raw = getenv("VGI_ARGUMENTS_REF_BYTES");
+    while (raw && isspace((unsigned char)*raw)) ++raw;
+    if (!raw || !*raw) {
+        snprintf(out, 24, "%s", VGI_DEFAULT_ARGUMENTS_REF_BYTES);
+        return 0;
+    }
+    size_t n = strlen(raw);
+    while (n && isspace((unsigned char)raw[n - 1])) --n;
+    int valid = n >= 1 && n <= 19 && raw[0] != '0';
+    for (size_t i = 0; valid && i < n; ++i) valid = isdigit((unsigned char)raw[i]) != 0;
+    if (!valid) {
+        ArrowErrorSet(error,
+                      "VGI_ARGUMENTS_REF_BYTES must be a positive integer number of bytes (no "
+                      "sign, no leading zero, at most 19 digits)");
+        return EINVAL;
+    }
+    memcpy(out, raw, n);
+    out[n] = 0;
+    return 0;
+}
 int VgiWorkerServeHttp(struct VgiWorker *worker, const struct VgiHttpOptions *options,
                        struct ArrowError *error) {
+    /* Blob vendor (VGI_BLOB_VENDOR_URL): results over the threshold are
+     * externalized, `__upload_url__` grants and argument references come
+     * from it, and VGI_RPC_MAX_REQUEST_BYTES sets the request cap. */
+    struct VgiHttpOptions configured = *options;
+    struct VgiVendor *vendor = NULL;
+    int rc = VgiHttpConfigureFromEnv(worker->rpc, &configured, &vendor, error);
+    /* The 3.4 maximum stream duration (large-values spec §8). */
+    if (!rc && !configured.stream_ttl_seconds) configured.stream_ttl_seconds = 21600;
+    /* The capability signal: sent whenever this worker grants uploads and can
+     * fetch what they create, which a vendor always can; never otherwise.
+     * VGI_TEST_DISABLE_ARGUMENTS_REF=1 turns it off (the extension's
+     * arguments_ref_fallback.test). */
+    char ref_bytes[24];
+    const char *names[1] = {VGI_ARGUMENTS_REF_BYTES_HEADER}, *values[1] = {ref_bytes};
+    const char *disable = getenv("VGI_TEST_DISABLE_ARGUMENTS_REF");
+    if (!rc && vendor && !configured.capability_header_count &&
+        !(disable && *disable && strcmp(disable, "0"))) {
+        rc = arguments_ref_bytes(ref_bytes, error);
+        if (!rc) {
+            configured.capability_header_names = names;
+            configured.capability_header_values = values;
+            configured.capability_header_count = 1;
+        }
+    }
     int hosted = 0;
-    int rc = VgiHostedModeEnabled(&hosted, error);
-    if (rc || !hosted) return rc ? rc : serve_http(worker, options, error);
-    struct VgiHttpOptions effective;
-    struct VgiJwtVerifier *verifier = NULL;
-    rc = VgiHostedPrepare(options, &effective, &verifier, error);
-    if (!rc) rc = serve_http(worker, &effective, error);
-    VgiJwtVerifierFree(verifier);
+    if (!rc) rc = VgiHostedModeEnabled(&hosted, error);
+    if (!rc && !hosted) rc = serve_http(worker, &configured, error);
+    if (!rc && hosted) {
+        struct VgiHttpOptions effective;
+        struct VgiJwtVerifier *verifier = NULL;
+        rc = VgiHostedPrepare(&configured, &effective, &verifier, error);
+        if (!rc) rc = serve_http(worker, &effective, error);
+        VgiJwtVerifierFree(verifier);
+    }
+    VgiVendorFree(vendor);
     return rc;
 }
 int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowError *error) {
@@ -1961,21 +2105,10 @@ int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowEr
         const char *host = getenv("VGI_HTTP_HOST");
         if (host && *host) options.host = host;
         if (getenv("VGI_HTTP_NO_COMPRESSION")) options.compression = 0;
-        /* The request cap: the most the server buffers for one request body,
-         * advertised as VGI-Max-Request-Bytes (vgi-rpc's VGI_RPC_MAX_REQUEST_BYTES). */
-        const char *cap = getenv("VGI_RPC_MAX_REQUEST_BYTES");
-        if (cap && *cap) {
-            char *end = NULL;
-            errno = 0;
-            long long value = strtoll(cap, &end, 10);
-            if (errno || *end || value < 1) {
-                ArrowErrorSet(error, "VGI_RPC_MAX_REQUEST_BYTES must be a positive integer");
-                return EINVAL;
-            }
-            options.max_request_bytes = value;
-        }
+        /* The request cap (VGI_RPC_MAX_REQUEST_BYTES) and the blob vendor are
+         * read from the environment by VgiWorkerServeHttp. */
         unsigned char key_bytes[64][32];
-        struct VgiGrantKeys keys = {.keys = (const unsigned char(*)[32])key_bytes,
+        struct VgiGrantKeys keys = {.keys = (const unsigned char (*)[32])key_bytes,
                                     .max_ttl_seconds = 604800,
                                     .clock_skew_seconds = 60};
         const char *env = getenv("VGI_RPC_GRANT_KEYS");

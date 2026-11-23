@@ -29,3 +29,9 @@ add_test(NAME registration COMMAND vgi-registration-test)
 add_executable(vgi-constraints-test constraints_test.c)
 target_link_libraries(vgi-constraints-test PRIVATE vgi::vgi)
 add_test(NAME constraints COMMAND vgi-constraints-test)
+# Protocol 3.4 nested-binary conformance against the shared corpus.
+add_executable(vgi-nested-binary-test nested_binary_test.c)
+target_include_directories(vgi-nested-binary-test PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(vgi-nested-binary-test PRIVATE vgi::vgi PkgConfig::JSONC PkgConfig::SODIUM)
+add_test(NAME nested_binary COMMAND vgi-nested-binary-test
+    "${PROJECT_SOURCE_DIR}/conformance/nested-binary")

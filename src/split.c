@@ -15,6 +15,40 @@ static void feed(crypto_hash_sha256_state *hash, const char *key, const void *da
     const unsigned char zero = 0;
     crypto_hash_sha256_update(hash, &zero, 1);
 }
+static int append_u64le(struct ArrowBuffer *out, uint64_t value) {
+    unsigned char bytes[8];
+    for (int i = 0; i < 8; ++i) bytes[i] = (unsigned char)(value >> (8 * i));
+    return ArrowBufferAppend(out, bytes, 8);
+}
+static int argument_identity(const struct VgiBatch *bind, struct ArrowBuffer *out) {
+    int64_t field = VgiFieldIndex(&bind->schema, "arguments_location");
+    if (field >= 0 && !VgiBatchIsNull(bind, "arguments_location")) {
+        const struct ArrowSchema *type = bind->schema.children[field];
+        const struct ArrowArrayView *location = bind->view.children[field];
+        int64_t size_id = VgiFieldIndex(type, "size"), sha_id = VgiFieldIndex(type, "sha256");
+        if (size_id < 0 || sha_id < 0) return EINVAL;
+        int64_t row = location->offset;
+        struct ArrowStringView hex = VgiValueString(location->children[sha_id], row);
+        unsigned char digest[32];
+        size_t n = 0;
+        if (hex.size_bytes != 64 ||
+            sodium_hex2bin(digest, sizeof(digest), hex.data, 64, NULL, &n, NULL) || n != 32)
+            return EINVAL;
+        const unsigned char tag = 1;
+        int rc = ArrowBufferAppend(out, &tag, 1);
+        if (!rc)
+            rc = append_u64le(
+                out, (uint64_t)ArrowArrayViewGetIntUnsafe(location->children[size_id], row));
+        if (!rc) rc = ArrowBufferAppend(out, digest, sizeof(digest));
+        return rc;
+    }
+    struct ArrowBufferView args = VgiBatchBytes(bind, "arguments");
+    const unsigned char tag = 0;
+    int rc = ArrowBufferAppend(out, &tag, 1);
+    if (!rc) rc = append_u64le(out, (uint64_t)args.size_bytes);
+    if (!rc && args.size_bytes) rc = ArrowBufferAppend(out, args.data.data, args.size_bytes);
+    return rc;
+}
 int VgiSplitFingerprint(const struct VgiBatch *bind, unsigned char out[16]) {
     if (!bind || !out) return EINVAL;
     crypto_hash_sha256_state hash;
@@ -32,9 +66,20 @@ int VgiSplitFingerprint(const struct VgiBatch *bind, unsigned char out[16]) {
     }
     struct ArrowStringView name = VgiBatchString(bind, "function_name");
     feed(&hash, "function_name", name.data, name.size_bytes);
-    struct ArrowBufferView args = VgiBatchBytes(bind, "arguments"),
-                           settings = VgiBatchBytes(bind, "settings");
-    feed(&hash, "arguments", args.data.data, args.size_bytes);
+    /* Large-values spec §5a: inline arguments contribute 0x00 || u64le(len) ||
+     * bytes; an arguments_location contributes 0x01 || u64le(size) || the 32
+     * raw SHA-256 bytes, never the sealed ref (it carries a random nonce).
+     * Plan and init carry the same bind call bytes, so both sides agree. */
+    struct ArrowBuffer arguments;
+    ArrowBufferInit(&arguments);
+    int rc = argument_identity(bind, &arguments);
+    if (rc) {
+        ArrowBufferReset(&arguments);
+        return rc;
+    }
+    struct ArrowBufferView settings = VgiBatchBytes(bind, "settings");
+    feed(&hash, "arguments", arguments.data, arguments.size_bytes);
+    ArrowBufferReset(&arguments);
     feed(&hash, "settings", settings.data.data, settings.size_bytes);
     unsigned char digest[crypto_hash_sha256_BYTES];
     crypto_hash_sha256_final(&hash, digest);
