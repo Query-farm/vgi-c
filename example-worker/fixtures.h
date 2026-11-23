@@ -9,6 +9,9 @@ struct ExampleFunction {
     struct ArrowSchema arguments;
 };
 int ExampleRegister(struct VgiWorker *worker, struct ArrowError *error);
+/* The blob_test catalog's functions (blob_fixtures.c); before the catalogs. */
+int ExampleBlobRegister(struct VgiWorker *worker, struct ArrowError *error);
+int ExampleBlobStorageRegister(struct VgiWorker *worker, struct ArrowError *error);
 int ExampleScalarSupported(const char *name);
 int ExampleScalarBind(void *data, struct VgiFunctionCall *call, struct ArrowSchema *output);
 int ExampleScalarProcess(void *data, struct VgiFunctionCall *call, const struct VgiBatch *input,

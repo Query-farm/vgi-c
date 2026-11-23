@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "blob_catalog_data.h"
 #include "catalog_data.h"
 #include "fixture_data.h"
 #include "vgi/catalog.h"
@@ -14,10 +15,10 @@ static void release_function(void *data) {
     if (function->arguments.release) ArrowSchemaRelease(&function->arguments);
     free(function);
 }
-static int register_catalogs(struct VgiWorker *worker, struct ArrowError *error) {
+static int register_catalogs(struct VgiWorker *worker, struct ArrowBufferView data,
+                             struct ArrowError *error) {
     struct VgiBatch catalogs = {0};
-    int rc = VgiBatchDecode(&catalogs,
-                            (struct ArrowBufferView){{catalog_data}, sizeof(catalog_data)}, error);
+    int rc = VgiBatchDecode(&catalogs, data, error);
     if (!rc) rc = ExampleFixturePaths(&catalogs, error);
     const char *primary = getenv("VGI_WORKER_CATALOG_NAME");
     if (!primary || !*primary) primary = "example";
@@ -71,7 +72,8 @@ static int register_catalogs(struct VgiWorker *worker, struct ArrowError *error)
         VgiBatchReset(&contents);
         VgiBatchReset(&extras);
     }
-    if (!rc && (!strcmp(primary, "versioned") || !strcmp(primary, "versioned_tables"))) {
+    if (!rc && data.data.data == catalog_data &&
+        (!strcmp(primary, "versioned") || !strcmp(primary, "versioned_tables"))) {
         int tables = !strcmp(primary, "versioned_tables");
         const char *data_simple[] = {"1.0.0", "1.1.0", "1.2.0"},
                    *data_tables[] = {"1.0.0", "1.1.0", "2.0.0", "3.0.0"};
@@ -285,7 +287,16 @@ int ExampleRegister(struct VgiWorker *worker, struct ArrowError *error) {
             memory_names[i], "Mutable catalog_contents fixture", i == 0, (enum VgiCatalogEtag)i};
         rc = VgiWorkerRegisterMemoryCatalog(worker, &options, error);
     }
-    if (!rc) rc = register_catalogs(worker, error);
+    if (!rc) rc = ExampleBlobRegister(worker, error);
+    if (!rc) rc = ExampleBlobStorageRegister(worker, error);
+    if (!rc)
+        rc = register_catalogs(
+            worker, (struct ArrowBufferView){{catalog_data}, sizeof(catalog_data)}, error);
+    /* blob_test, captured from vgi-python's fixture worker (blob_fixtures.c). */
+    if (!rc)
+        rc = register_catalogs(
+            worker, (struct ArrowBufferView){{blob_catalog_data}, sizeof(blob_catalog_data)},
+            error);
     if (!rc) VgiWorkerSetCatalogHandler(worker, ExampleCatalogHandler, worker);
     return rc;
 }

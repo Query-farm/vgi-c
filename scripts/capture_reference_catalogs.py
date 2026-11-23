@@ -24,6 +24,15 @@ def main():
     parser.add_argument("--data-version")
     parser.add_argument("--all-configurations", action="store_true")
     parser.add_argument(
+        "--only", action="append", default=[], help="capture only these catalogs (repeatable)"
+    )
+    parser.add_argument(
+        "--function",
+        action="append",
+        default=[],
+        help="with --only, keep only these functions (repeatable); tables are kept",
+    )
+    parser.add_argument(
         "--output", type=Path, default=ROOT / "example-worker/generated/catalogs.arrow"
     )
     args = parser.parse_args()
@@ -95,6 +104,8 @@ def main():
         name = one(pa.ipc.open_stream(catalog).read_all())["name"]
         if name in ("contents_hash", "contents_memory", "contents_reval"):
             continue
+        if args.only and name not in args.only:
+            continue
         options = (
             encode(pa.RecordBatch.from_pylist([{"api_key": "capture-placeholder"}]))
             if name in ("attach_options_required", "ticket_probe")
@@ -132,24 +143,39 @@ def main():
                 method = "catalog_schema_contents_" + kind.split("_")[-1]
                 values = {"attach_opaque_data": cookie, "path": path}
                 if "_" in kind:
-                    values["type"] = kind.split("_")[0].upper()
+                    # vgi-python names the SchemaObjectType member
+                    # (SCALAR_FUNCTION); the C++ reference took FunctionType.
+                    values["type"] = kind[:-1].upper()
+                    try:
+                        entry[kind] = one(rpc(method, values))["items"]
+                        continue
+                    except AssertionError:
+                        values["type"] = kind.split("_")[0].upper()
                 entry[kind] = one(rpc(method, values))["items"]
-            # Buffering registrations travel with the table surface.
-            entry["table_functions"] += one(
-                rpc(
-                    "catalog_schema_contents_functions",
-                    {
-                        "attach_opaque_data": cookie,
-                        "path": path,
-                        "type": "TABLE_BUFFERING",
-                    },
-                )
-            )["items"]
+            # Buffering registrations travel with the table surface (C++
+            # reference only; vgi-python lists them as table functions).
+            try:
+                entry["table_functions"] += one(
+                    rpc(
+                        "catalog_schema_contents_functions",
+                        {
+                            "attach_opaque_data": cookie,
+                            "path": path,
+                            "type": "TABLE_BUFFERING",
+                        },
+                    )
+                )["items"]
+            except AssertionError:
+                pass
             for kind in ("scalar_functions", "aggregate_functions", "table_functions"):
                 entry[kind] = [
                     item
                     for item in entry[kind]
                     if one(pa.ipc.open_stream(item).read_all())["name"] not in SDK_SPECIFIC
+                    and (
+                        not args.function
+                        or one(pa.ipc.open_stream(item).read_all())["name"] in args.function
+                    )
                 ]
             for table in entry["tables"]:
                 table_name = one(pa.ipc.open_stream(table).read_all())["name"]
