@@ -6,8 +6,7 @@ name: CI
 
 on:
   push:
-    # TODO(release-wave): drop protocol-3.4 once it is merged.
-    branches: [main, protocol-3.4]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -23,21 +22,18 @@ concurrency:
 env:
   # Test sources and the statically linked native runner come from this exact
   # VGI commit (protocol vgi.v3 / 3.4.0, with the large-value vendor-lane files).
-  # TODO(release-wave): repin to the released v2.0 commit carrying protocol 3.4.
+  # Stays on this protocol-3.4 commit until the extension ships on v2.0 (after
+  # the worker fleet); then repin to the released v2.0 commit.
   VGI_REF: e99683f2af215c5a166697945e796c91d0cc66fe
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
-  # The vgi-rpc-c revision this SDK builds against (upload-URL v2, JWT
+  # The vgi-rpc-c release this SDK builds against (upload-URL v2, JWT
   # verification and authentication before the body for hosted mode, StateRef,
   # argument references, the object cache and the blob-vendor client).
-  # TODO(release-wave): back to main / a release tag once vgi-rpc-c protocol-3.4
-  # is merged and released.
-  VGI_RPC_C_REF: b7e1ba5e7a35db17f4a6823f685a1198819af4dd
-  # The Orchard hosted-mode conformance harness (test/hosted/) and the Python
-  # client pins it is tested with.
-  # TODO(release-wave): follow VGI_REF once the harness is on the released commit.
-  VGI_HOSTED_REF: fce57984a7e8ea35f9dcd4a034b5ed37c85ca5c5
+  VGI_RPC_C_REF: v0.2.0
+  # The Orchard hosted-mode conformance harness (test/hosted/) comes from
+  # VGI_REF; these are the Python client pins it is tested with.
   VGI_PYTHON_HOSTED_REF: 85ae674bb83aa3d3eb0b05e01c7b5ceb0984b6cd
-  VGI_RPC_PYTHON_HOSTED_REF: f0fb6754ae5b70900ba21629a1e2d48eb2182774
+  VGI_RPC_PYTHON_HOSTED_VERSION: 0.57.0
 
 jobs:
   build:
@@ -194,7 +190,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Query-farm/vgi
-          ref: ${{ env.VGI_HOSTED_REF }}
+          ref: ${{ env.VGI_REF }}
           path: vgi-upstream
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -231,6 +227,6 @@ jobs:
         run: |
           uv run --no-project -p 3.13 \
             --with "vgi-python[oauth] @ git+https://github.com/Query-farm/vgi-python@${VGI_PYTHON_HOSTED_REF}" \
-            --with "vgi-rpc[http,oauth] @ git+https://github.com/Query-farm/vgi-rpc-python@${VGI_RPC_PYTHON_HOSTED_REF}" \
+            --with "vgi-rpc[http,oauth]==${VGI_RPC_PYTHON_HOSTED_VERSION}" \
             --with pytest \
             python -m pytest tests/check_hosted.py -v

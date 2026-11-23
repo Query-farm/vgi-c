@@ -166,7 +166,7 @@ calls can share the same pooled worker connection.
 
 Validated on Linux aarch64 for vgi.v3 / 3.4.0 with `ci/run-integration.sh`
 and `ci/run-vendor.sh` (suite and native Haybarn runner both at Query-farm/vgi
-`e99683f`, branch `protocol-3.4`, vgi-rpc-c `protocol-3.4`, with
+`e99683f`, branch `protocol-3.4`, vgi-rpc-c 0.2.0, with
 `VGI_ENGINE_CORRELATED_NAMED_ARGS=1` and
 `VGI_ENGINE_DELETE_RETURNING_VIRTUAL_COLUMNS=1` from its `make engine_test_env`):
 

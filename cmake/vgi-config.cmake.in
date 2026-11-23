@@ -1,6 +1,6 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
-find_dependency(vgi_rpc 0.1 CONFIG)
+find_dependency(vgi_rpc 0.2 CONFIG)
 if(@VGI_BUILD_WORKER@)
     find_dependency(Threads)
     find_dependency(SQLite3)
