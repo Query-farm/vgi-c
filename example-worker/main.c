@@ -13,6 +13,8 @@ int main(int argc, char **argv) {
     struct VgiWorker *worker = VgiWorkerNew(getenv("VGI_WORKER_CATALOG_NAME"));
     int rc = worker ? ExampleRegister(worker, &error) : ENOMEM;
     if (!rc) rc = ExampleSecondaryRegister(worker, &error);
+    /* PROTOCOL_VERSIONS_V1 fixture switch: impersonate another version. */
+    if (!rc) rc = VgiWorkerApplyTestProtocolRange(worker, &error);
     int hosted = 0;
     if (!rc) rc = VgiHostedModeEnabled(&hosted, &error);
     if (!rc && hosted) rc = ExampleHostedRegister(worker, &error);

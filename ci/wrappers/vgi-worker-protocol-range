@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The `example` catalog impersonating a worker whose vgi.v3 window is 3.3-3.3
+# (VGI_TEST_PROTOCOL_RANGE, PROTOCOL_VERSIONS_V1): it advertises 3.3-3.3 and
+# refuses 3.4 requests, for the extension's protocol_negotiation tests.
+# Execs $VGI_WORKER_BIN.
+export VGI_WORKER_CATALOG_NAME=example
+export VGI_TEST_PROTOCOL_RANGE=3.3-3.3
+exec "${VGI_WORKER_BIN:?VGI_WORKER_BIN must point at vgi-example-worker}" "$@"

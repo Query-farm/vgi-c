@@ -122,6 +122,7 @@ WV="$HERE/wrappers/vgi-worker-versioned"
 WVT="$HERE/wrappers/vgi-worker-versioned-tables"
 WAO="$HERE/wrappers/vgi-worker-attach-options"
 WBP="$HERE/wrappers/vgi-worker-bad-protocol"
+WPR="$HERE/wrappers/vgi-worker-protocol-range"
 # attach/versioned_tables_*_http and attach/versioning_http attach an http://
 # worker regardless of the main transport.
 boot_versioned_http() {
@@ -140,6 +141,7 @@ case "$TRANSPORT" in
     export VGI_ATTACH_OPTIONS_WORKER="$WAO"
     export VGI_ATTACH_OPTIONS_REQUIRED_WORKER="$WAO"
     export VGI_BAD_PROTOCOL_WORKER="$WBP"
+    export VGI_PROTOCOL_RANGE_WORKER="$WPR"
     boot_versioned_http
     ;;
   launch)
@@ -151,6 +153,7 @@ case "$TRANSPORT" in
     export VGI_ATTACH_OPTIONS_WORKER="launch:${WAO}"
     export VGI_ATTACH_OPTIONS_REQUIRED_WORKER="launch:${WAO}"
     export VGI_BAD_PROTOCOL_WORKER="launch:${WBP}"
+    export VGI_PROTOCOL_RANGE_WORKER="launch:${WPR}"
     boot_versioned_http
     ;;
   http)
@@ -161,6 +164,11 @@ case "$TRANSPORT" in
       "VGI_OPTIONAL_BEARER_TOKENS=vgi-test-alice=alice,vgi-test-bob=bob"
     export VGI_TEST_WORKER="http://localhost:${BOOTED_PORT}"
     export VGI_HTTP_TRANSPORT=1
+    # protocol_negotiation/range_disjoint.test over HTTP: the windows arrive
+    # in VGI-Protocol-Versions rather than the reflection answer.
+    boot_http_worker "$VGI_WORKER_BIN" "VGI_WORKER_CATALOG_NAME=example" \
+      "VGI_TEST_PROTOCOL_RANGE=3.3-3.3"
+    export VGI_PROTOCOL_RANGE_WORKER="http://localhost:${BOOTED_PORT}"
     boot_versioned_http
     ;;
   *)

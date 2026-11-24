@@ -355,6 +355,8 @@ def _assert_401(status: int, headers: dict[str, str]) -> None:
     assert "vgi-supported-encodings" in headers
     assert "vgi-accept-max-response-bytes-support" in headers
     assert headers.get("access-control-allow-origin") == "*"
+    # PROTOCOL_VERSIONS_V1 §4.1: hosted 401s advertise the windows too.
+    assert "vgi.v3=3.4-3.4" in headers.get("vgi-protocol-versions", ""), headers
 
 
 # ---------------------------------------------------------------------------

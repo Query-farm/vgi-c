@@ -1896,9 +1896,64 @@ int VgiWorkerAddProtocol(struct VgiWorker *worker, const struct VgiRpcProtocol *
                          struct ArrowError *error) {
     return VgiRpcServerAddProtocol(worker->rpc, protocol, error);
 }
+int VgiWorkerSetProtocolVersionRange(struct VgiWorker *worker, const char *protocol,
+                                     const char *range) {
+    return worker ? VgiRpcServerSetProtocolVersionRange(worker->rpc, protocol, range) : EINVAL;
+}
+int VgiWorkerApplyTestProtocolRange(struct VgiWorker *worker, struct ArrowError *error) {
+    const char *raw = getenv(VGI_TEST_PROTOCOL_RANGE_ENV);
+    if (!worker) return EINVAL;
+    while (raw && (*raw == ' ' || *raw == '\t')) ++raw;
+    if (!raw || !*raw) return 0;
+    char *text = text_copy(raw);
+    if (!text) return ENOMEM;
+    int rc = 0;
+    if (!strchr(text, '=')) {
+        struct VgiVersionWindow window;
+        rc = VgiVersionWindowParse(text, strlen(text), &window)
+                 ? EINVAL
+                 : VgiWorkerSetProtocolVersionRange(worker, VGI_PROTOCOL_NAME, text);
+    } else {
+        char *save = NULL;
+        for (char *entry = strtok_r(text, ",", &save); !rc && entry;
+             entry = strtok_r(NULL, ",", &save)) {
+            while (*entry == ' ' || *entry == '\t') ++entry;
+            if (!*entry) continue;
+            char *eq = strchr(entry, '=');
+            struct VgiVersionWindow window;
+            if (!eq) {
+                rc = EINVAL;
+                break;
+            }
+            *eq = 0;
+            size_t n = strlen(entry);
+            while (n && (entry[n - 1] == ' ' || entry[n - 1] == '\t')) entry[--n] = 0;
+            rc = !n || VgiVersionWindowParse(eq + 1, strlen(eq + 1), &window)
+                     ? EINVAL
+                     : VgiWorkerSetProtocolVersionRange(worker, entry, eq + 1);
+        }
+    }
+    free(text);
+    if (rc == EINVAL)
+        ArrowErrorSet(error, "%s=%s: expected MAJ.MIN-MAJ.MIN or name=MAJ.MIN-MAJ.MIN[, ...]",
+                      VGI_TEST_PROTOCOL_RANGE_ENV, raw);
+    else if (!rc)
+        fprintf(stderr,
+                "vgi-c: %s is set: advertising and accepting %s instead of the declared "
+                "protocol versions (test fixture switch)\n",
+                VGI_TEST_PROTOCOL_RANGE_ENV, VgiRpcServerProtocolVersions(worker->rpc));
+    return rc;
+}
+/* Direct object storage contract §1: the C SDK is vendor-only, so a worker
+ * configured for S3 or GCS (or ambiguously) refuses to start. */
+static int storage_backend_check(struct ArrowError *error) {
+    enum VgiStorageBackend backend;
+    return VgiStorageBackendFromEnv(&backend, error);
+}
 int VgiWorkerServe(struct VgiWorker *worker, FILE *input, FILE *output, struct ArrowError *error) {
     int hosted = 0;
-    int rc = VgiHostedModeEnabled(&hosted, error);
+    int rc = storage_backend_check(error);
+    if (!rc) rc = VgiHostedModeEnabled(&hosted, error);
     if (!rc && hosted)
         rc = VgiHostedRefuse(error,
                              "only --http is supported; standard input/output carries no Pass.");
@@ -1975,7 +2030,8 @@ int VgiWorkerServeHttp(struct VgiWorker *worker, const struct VgiHttpOptions *op
      * from it, and VGI_RPC_MAX_REQUEST_BYTES sets the request cap. */
     struct VgiHttpOptions configured = *options;
     struct VgiVendor *vendor = NULL;
-    int rc = VgiHttpConfigureFromEnv(worker->rpc, &configured, &vendor, error);
+    int rc = storage_backend_check(error);
+    if (!rc) rc = VgiHttpConfigureFromEnv(worker->rpc, &configured, &vendor, error);
     /* The 3.4 maximum stream duration (large-values spec §8). */
     if (!rc && !configured.stream_ttl_seconds) configured.stream_ttl_seconds = 21600;
     /* The capability signal: sent whenever this worker grants uploads and can
@@ -2075,6 +2131,8 @@ int VgiWorkerRun(struct VgiWorker *worker, int argc, char **argv, struct ArrowEr
         ArrowErrorSet(error, "Select one transport");
         return EINVAL;
     }
+    int storage_rc = storage_backend_check(error);
+    if (storage_rc) return storage_rc;
     int hosted = 0;
     int hosted_rc = VgiHostedModeEnabled(&hosted, error);
     if (hosted_rc) return hosted_rc;

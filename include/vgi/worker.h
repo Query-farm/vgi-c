@@ -110,6 +110,19 @@ void VgiWorkerFree(struct VgiWorker *worker);
 int VgiWorkerRegisterFunction(struct VgiWorker *worker, struct VgiFunction *function,
                               struct ArrowError *error);
 int VgiWorkerAddProtocol(struct VgiWorker *, const struct VgiRpcProtocol *, struct ArrowError *);
+/* PROTOCOL_VERSIONS_V1: every protocol the worker serves with a version
+ * (vgi.v3, vgi.attach_tickets.v1 in hosted mode, any added protocol) is gated
+ * against and advertised with its MAJOR.MINOR window, exactly its declared
+ * version unless overridden here ("3.3-3.4", or "3.3" for 3.3-3.3; NULL or ""
+ * restores the default). Before serving. */
+int VgiWorkerSetProtocolVersionRange(struct VgiWorker *, const char *protocol, const char *range);
+/* The fixture switch VGI_TEST_PROTOCOL_RANGE, for test workers that must
+ * impersonate another version: a bare range ("3.3-3.3") overrides vgi.v3's
+ * window, "name=MIN-MAX[, ...]" names protocols. Unset or empty does nothing;
+ * a malformed value is EINVAL (a silently ignored switch would make the test
+ * it serves pass for the wrong reason). */
+#define VGI_TEST_PROTOCOL_RANGE_ENV "VGI_TEST_PROTOCOL_RANGE"
+int VgiWorkerApplyTestProtocolRange(struct VgiWorker *, struct ArrowError *);
 struct VgiHttpOptions;
 /* Configure default HTTP callbacks before Run; borrowed objects must outlive it. */
 void VgiWorkerSetHttpOptions(struct VgiWorker *, const struct VgiHttpOptions *);

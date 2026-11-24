@@ -21,17 +21,19 @@ concurrency:
 
 env:
   # Test sources and the statically linked native runner come from this exact
-  # VGI commit (protocol vgi.v3 / 3.4.0, with the large-value vendor-lane files).
-  # Stays on this protocol-3.4 commit until the extension ships on v2.0 (after
-  # the worker fleet); then repin to the released v2.0 commit.
-  VGI_REF: e99683f2af215c5a166697945e796c91d0cc66fe
+  # VGI commit (protocol vgi.v3 / 3.4.0, with the large-value vendor-lane files
+  # and protocol version negotiation, PROTOCOL_VERSIONS_V1, on Haybarn
+  # 2.0.1-rc3). Stays on this protocol-3.4 commit until the extension ships on
+  # v2.0 (after the worker fleet); then repin to the released v2.0 commit.
+  VGI_REF: ebf28ead2703ab2b0f3ec818aa9a63a99bd8863f
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
-  # The vgi-rpc-c commit this SDK builds against: protocol-3.4 d74b8b5, v0.2.0
-  # plus storage stall timeouts (repin to the next release). v0.2.0 brought
-  # upload-URL v2, JWT
-  # verification and authentication before the body for hosted mode, StateRef,
-  # argument references, the object cache and the blob-vendor client).
-  VGI_RPC_C_REF: d74b8b5c3f609476def7ef25a877e9f103ac38ef
+  # The vgi-rpc-c commit this SDK builds against: protocol-3.4 2197025, v0.2.0
+  # plus storage stall timeouts, protocol version negotiation and the
+  # vendor-only storage-backend check (repin to the next release). v0.2.0
+  # brought upload-URL v2, JWT verification and authentication before the body
+  # for hosted mode, StateRef, argument references, the object cache and the
+  # blob-vendor client.
+  VGI_RPC_C_REF: 21970253a2796e85ff8ca87ae3a2979c75915ed1
   # The Orchard hosted-mode conformance harness (test/hosted/) comes from
   # VGI_REF; these are the Python client pins it is tested with. vgi-rpc stays
   # a git pin while the vgi-python commit carries a [tool.uv.sources] git pin
