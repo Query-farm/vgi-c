@@ -76,6 +76,16 @@ if ! ( cd "$INTEGRATION" || exit 1
   echo "::error::failed to stage the VGI test corpus" >&2
   exit 1
 fi
+# Protocol version negotiation (PROTOCOL_VERSIONS_V1) lives beside the
+# integration suite; stage it inside it so every lane's glob picks it up.
+NEGOTIATION="$VGI_SRC/test/sql/protocol_negotiation"
+if [ -d "$NEGOTIATION" ]; then
+  mkdir -p "$STAGE/test/sql/integration/protocol_negotiation" || exit 1
+  for f in "$NEGOTIATION"/*.test; do
+    awk -v http="$AWK_HTTP" -v install="$INSTALL_EXTENSIONS" -f "$HERE/preprocess-require.awk" "$f" \
+        > "$STAGE/test/sql/integration/protocol_negotiation/$(basename "$f")" || exit 1
+  done
+fi
 # The database-worker package tests package this fixture by a path relative to
 # the unittest working directory; stage it with its executable bit.
 DATABASE_WORKER_FIXTURE="$VGI_SRC/test/support/database_worker_fixture.sh"
