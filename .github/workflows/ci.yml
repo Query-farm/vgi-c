@@ -26,10 +26,12 @@ env:
   # the worker fleet); then repin to the released v2.0 commit.
   VGI_REF: e99683f2af215c5a166697945e796c91d0cc66fe
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
-  # The vgi-rpc-c release this SDK builds against (upload-URL v2, JWT
+  # The vgi-rpc-c commit this SDK builds against: protocol-3.4 d74b8b5, v0.2.0
+  # plus storage stall timeouts (repin to the next release). v0.2.0 brought
+  # upload-URL v2, JWT
   # verification and authentication before the body for hosted mode, StateRef,
   # argument references, the object cache and the blob-vendor client).
-  VGI_RPC_C_REF: v0.2.0
+  VGI_RPC_C_REF: d74b8b5c3f609476def7ef25a877e9f103ac38ef
   # The Orchard hosted-mode conformance harness (test/hosted/) comes from
   # VGI_REF; these are the Python client pins it is tested with. vgi-rpc stays
   # a git pin while the vgi-python commit carries a [tool.uv.sources] git pin
