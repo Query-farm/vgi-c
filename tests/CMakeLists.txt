@@ -43,3 +43,10 @@ target_include_directories(vgi-nested-binary-test PRIVATE "${PROJECT_SOURCE_DIR}
 target_link_libraries(vgi-nested-binary-test PRIVATE vgi::vgi PkgConfig::JSONC PkgConfig::SODIUM)
 add_test(NAME nested_binary COMMAND vgi-nested-binary-test
     "${PROJECT_SOURCE_DIR}/conformance/nested-binary")
+# Secret scope matching (VgiScopeMatches, VgiSecretSelect) against DuckDB's own
+# rule: 3025 shared vectors generated from the engine's C++ (duckdb#28684,
+# authority boundary), vendored verbatim from vgi-python.
+add_executable(vgi-secret-scope-test secret_scope_test.c)
+target_link_libraries(vgi-secret-scope-test PRIVATE vgi::vgi PkgConfig::JSONC)
+add_test(NAME secret_scope COMMAND vgi-secret-scope-test
+    "${CMAKE_CURRENT_SOURCE_DIR}/data/scope_match_vectors.json")

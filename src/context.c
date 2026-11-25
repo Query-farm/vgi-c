@@ -17,6 +17,40 @@ static int matches(struct ArrowStringView value, const char *text) {
     return value.data && value.size_bytes == (int64_t)strlen(text) &&
            !memcmp(value.data, text, (size_t)value.size_bytes);
 }
+/* Byte offset of the first byte in text[from, size) that is one of `set`, or
+ * size. A NUL byte never matches (strchr would find the terminator). */
+static int64_t find_first_of(struct ArrowStringView text, int64_t from, const char *set) {
+    for (int64_t i = from; i < text.size_bytes; ++i)
+        if (text.data[i] && strchr(set, text.data[i])) return i;
+    return text.size_bytes;
+}
+/* Byte offset of the first "://" in text, or -1. */
+static int64_t find_scheme_end(struct ArrowStringView text) {
+    for (int64_t i = 0; i + 3 <= text.size_bytes; ++i)
+        if (!memcmp(text.data + i, "://", 3)) return i;
+    return -1;
+}
+/* Length of the URI authority of `text`, or 0 when it has none; DuckDB's
+ * StringUtil::GetURIAuthority. `text` counts as a URI only if it contains
+ * "://" after a non-empty scheme and its first '/' or '\' is the one that
+ * starts that "://". The authority runs from after "://" to the first '/',
+ * '\', '?' or '#' (or the end). The authority starts at scheme_end + 3. */
+static int64_t uri_authority_length(struct ArrowStringView text, int64_t scheme_end) {
+    if (scheme_end <= 0 || find_first_of(text, 0, "/\\") != scheme_end + 1) return 0;
+    int64_t start = scheme_end + 3;
+    return find_first_of(text, start, "/\\?#") - start;
+}
+int VgiScopeMatches(struct ArrowStringView prefix, struct ArrowStringView path) {
+    if (!prefix.data || prefix.size_bytes <= 0 || !path.data ||
+        prefix.size_bytes > path.size_bytes ||
+        memcmp(path.data, prefix.data, (size_t)prefix.size_bytes))
+        return 0;
+    int64_t scheme_end = find_scheme_end(prefix);
+    int64_t authority = uri_authority_length(prefix, scheme_end);
+    int authority_only = authority > 0 && prefix.size_bytes == scheme_end + 3 + authority;
+    if (!authority_only) return 1;
+    return path.size_bytes == prefix.size_bytes || path.data[prefix.size_bytes] == '/';
+}
 const struct ArrowArrayView *VgiSecretSelect(const struct VgiFunctionCall *call, const char *type,
                                              const struct ArrowStringView *path,
                                              const struct ArrowSchema **out_schema) {
@@ -43,9 +77,8 @@ const struct ArrowArrayView *VgiSecretSelect(const struct VgiFunctionCall *call,
             int64_t end = start;
             while (end < scopes.size_bytes && scopes.data[end] != '\n') ++end;
             int64_t length = end - start;
-            if (length && length <= path->size_bytes &&
-                !memcmp(path->data, scopes.data + start, (size_t)length) && length > candidate)
-                candidate = length;
+            struct ArrowStringView prefix = {scopes.data + start, length};
+            if (length > candidate && VgiScopeMatches(prefix, *path)) candidate = length;
             start = end + 1;
         }
         if (candidate > score) {
