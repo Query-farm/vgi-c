@@ -27,19 +27,16 @@ env:
   # v2.0 (after the worker fleet); then repin to the released v2.0 commit.
   VGI_REF: ebf28ead2703ab2b0f3ec818aa9a63a99bd8863f
   VGI_NATIVE_RUNNER_BRANCH: protocol-3.4
-  # The vgi-rpc-c commit this SDK builds against: protocol-3.4 2197025, v0.2.0
-  # plus storage stall timeouts, protocol version negotiation and the
-  # vendor-only storage-backend check (repin to the next release). v0.2.0
-  # brought upload-URL v2, JWT verification and authentication before the body
-  # for hosted mode, StateRef, argument references, the object cache and the
-  # blob-vendor client.
-  VGI_RPC_C_REF: 21970253a2796e85ff8ca87ae3a2979c75915ed1
+  # The vgi-rpc-c release this SDK builds against: 0.2.1 brought storage stall
+  # timeouts, protocol version negotiation and the vendor-only storage-backend
+  # check; 0.2.0 upload-URL v2, JWT verification and authentication before the
+  # body for hosted mode, StateRef, argument references, the object cache and
+  # the blob-vendor client.
+  VGI_RPC_C_REF: v0.2.1
   # The Orchard hosted-mode conformance harness (test/hosted/) comes from
-  # VGI_REF; these are the Python client pins it is tested with. vgi-rpc stays
-  # a git pin while the vgi-python commit carries a [tool.uv.sources] git pin
-  # for it (uv honours it, so a PyPI vgi-rpc==0.57.0 cannot resolve beside it).
-  VGI_PYTHON_HOSTED_REF: 85ae674bb83aa3d3eb0b05e01c7b5ceb0984b6cd
-  VGI_RPC_PYTHON_HOSTED_REF: f0fb6754ae5b70900ba21629a1e2d48eb2182774
+  # VGI_REF; these are the released Python clients it is tested with.
+  VGI_PYTHON_HOSTED_VERSION: 0.55.1
+  VGI_RPC_PYTHON_HOSTED_VERSION: 0.57.1
 
 jobs:
   build:
@@ -232,7 +229,7 @@ jobs:
           VGI_WORKER_BIN: ${{ github.workspace }}/bin/vgi-example-worker
         run: |
           uv run --no-project -p 3.13 \
-            --with "vgi-python[oauth] @ git+https://github.com/Query-farm/vgi-python@${VGI_PYTHON_HOSTED_REF}" \
-            --with "vgi-rpc[http,oauth] @ git+https://github.com/Query-farm/vgi-rpc-python@${VGI_RPC_PYTHON_HOSTED_REF}" \
+            --with "vgi-python[oauth]==${VGI_PYTHON_HOSTED_VERSION}" \
+            --with "vgi-rpc[http,oauth]==${VGI_RPC_PYTHON_HOSTED_VERSION}" \
             --with pytest \
             python -m pytest tests/check_hosted.py -v

@@ -166,18 +166,18 @@ calls can share the same pooled worker connection.
 
 Validated on Linux aarch64 for vgi.v3 / 3.4.0 with `ci/run-integration.sh`
 and `ci/run-vendor.sh` (suite and native Haybarn runner both at Query-farm/vgi
-`e99683f`, branch `protocol-3.4`, vgi-rpc-c 0.2.0, with
+`ebf28ea`, branch `protocol-3.4`, Haybarn 2.0.1-rc3, vgi-rpc-c 0.2.1, with
 `VGI_ENGINE_CORRELATED_NAMED_ARGS=1` and
 `VGI_ENGINE_DELETE_RETURNING_VIRTUAL_COLUMNS=1` from its `make engine_test_env`):
 
 | Check | Result |
 | --- | --- |
-| Subprocess SQL suite (422 staged) | 354 executed, all passed; 68 fixture-dependent skips |
-| Launcher SQL suite (422 staged) | 355 executed, all passed; 67 fixture-dependent skips |
-| HTTP SQL suite (419 staged) | 349 executed, all passed; 70 fixture-dependent skips |
+| Subprocess SQL suite (424 staged) | 356 executed, all passed; 68 fixture-dependent skips |
+| Launcher SQL suite (424 staged) | 357 executed, all passed; 67 fixture-dependent skips |
+| HTTP SQL suite (421 staged) | 351 executed, all passed; 70 fixture-dependent skips |
 | Protected bearer lane (HTTP) | 2 passed |
 | Blob-vendor lane: `test/sql/external_storage/*` | 18 passed (all 6 applicable `arguments_ref*.test`); 2 expected skips (`arguments_ref_state_ref.test`, single replica; `fetch_loopback_refused.test`) |
-| Blob-vendor lane: HTTP SQL suite with everything externalized | 349 executed, all passed; 70 fixture-dependent skips; bearer lane 2 passed |
+| Blob-vendor lane: HTTP SQL suite with everything externalized | 351 executed, all passed; 70 fixture-dependent skips; bearer lane 2 passed |
 | Native C tests | 9 groups passed, including the nested-binary corpus |
 | Schema and IPC interoperability (vgi-python `protocol-3.4` 33099b4) | 264 exact schemas, 84 method signatures, 266 round trips, 9 malformed streams |
 | RPC, continuation and cancellation checks (vgi-python `protocol-3.4` 33099b4) | passed |
